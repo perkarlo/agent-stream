@@ -1,0 +1,697 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["typer>=0.12", "rich>=13.7"]
+# ///
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  agent-stream — Claude Code oturumlarının komut akışı                     ║
+# ║                                                                          ║
+# ║  Kullanım:                                                               ║
+# ║    1) Akış:      agent-stream [-p proje] [-n satır]                      ║
+# ║    2) Pano:      agent-stream dash                                       ║
+# ║    3) Liste:     agent-stream sessions                                   ║
+# ║    4) Oynatma:   agent-stream replay <etiket>                            ║
+# ║    5) Makine:    agent-stream --json                                     ║
+# ║                                                                          ║
+# ║  Kaynak: ~/.claude/projects/<proje>/<session>.jsonl — salt okunur.       ║
+# ║  Hiçbir oturuma yazmaz, hook kurmaz, süreç başlatmaz.                    ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+from __future__ import annotations
+
+import glob
+import json
+import os
+import re
+import sys
+import time
+import tomllib
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Iterable
+
+import typer
+from rich.align import Align
+from rich.columns import Columns
+from rich.console import Console, Group, RenderableType
+from rich.live import Live
+from rich.panel import Panel
+from rich.segment import Segment, Segments
+from rich.spinner import Spinner
+from rich.syntax import Syntax
+from rich.table import Table
+from rich.text import Text
+
+VERSION = "1.0.0"
+HOME = Path.home()
+DEFAULT_ROOT = Path(os.environ.get("AGENT_STREAM_ROOT", HOME / ".claude" / "projects"))
+CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agent-stream" / "config.toml"
+
+EXIT_OK, EXIT_ERR, EXIT_USAGE, EXIT_SIGINT = 0, 1, 2, 130
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+SYSREM = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+# ─── Şerit renkleri ─────────────────────────────────────────────────────────
+# Renk oturum id'sinden türer: takipçi yeniden başlasa da aynı oturum aynı renkte.
+LANES = ["cyan", "magenta", "green", "yellow", "blue", "bright_magenta", "bright_cyan", "bright_red"]
+GLYPH = {
+    "Bash": "$", "Read": "▸", "Edit": "✎", "Write": "✎", "NotebookEdit": "✎",
+    "Grep": "⌕", "Glob": "⌕", "WebSearch": "⌕", "WebFetch": "⇣", "Task": "⤷", "Agent": "⤷",
+}
+
+out_console = Console()             # veri → stdout
+err_console = Console(stderr=True)  # banner, uyarı, hata → stderr
+
+
+# ─── Yardımcılar ────────────────────────────────────────────────────────────
+
+def die(msg: str, hint: str = "", code: int = EXIT_ERR) -> None:
+    err_console.print(f"[bold red]hata:[/] {msg}", highlight=False)
+    if hint:
+        err_console.print(f"      {hint}", style="dim", highlight=False)
+    raise typer.Exit(code)
+
+
+def lane_of(sid: str) -> str:
+    return LANES[sum(sid.encode()) % len(LANES)]
+
+
+def pretty_project(name: str) -> str:
+    """`-Users-ben-Documents-myapp` → `myapp`; ev dizininin kendisi → `~`."""
+    home = str(HOME).replace("/", "-")
+    if name == home:
+        return "~"
+    return name.removeprefix(f"{home}-Documents-").removeprefix(f"{home}-") or "~"
+
+
+def short_path(p: str) -> str:
+    if not p:
+        return "?"
+    p = p.replace(str(HOME), "~")
+    parts = p.rstrip("/").split("/")
+    return "/".join(parts[-2:]) if len(parts) > 2 else p
+
+
+def clean(text: str | None) -> str:
+    """Çıktıdan system-reminder bloklarını, ANSI dizilerini ve kontrol baytlarını atar."""
+    text = SYSREM.sub("", text or "")
+    return CTRL.sub("", ANSI.sub("", text)).rstrip()
+
+
+def clip(s: str, n: int) -> str:
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def parse_ts(iso: str | None) -> datetime:
+    if not iso:
+        return datetime.now()
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return datetime.now()
+
+
+def human_dur(sec: float) -> str:
+    if sec < 1:
+        return f"{sec * 1000:.0f}ms"
+    if sec < 60:
+        return f"{sec:.1f}s"
+    return f"{int(sec // 60)}dk {int(sec % 60)}s"
+
+
+# ─── Veri katmanı ───────────────────────────────────────────────────────────
+
+@dataclass
+class Cmd:
+    uid: str
+    sid: str
+    cwd: str
+    branch: str
+    sub: bool
+    tool: str
+    text: str
+    desc: str
+    started: datetime
+    ended: datetime | None = None
+    out: str = ""
+    err: str = ""
+    ok: bool = True
+
+    @property
+    def tag(self) -> str:
+        return self.sid[:4]
+
+    @property
+    def lane(self) -> str:
+        return lane_of(self.sid)
+
+    @property
+    def dur(self) -> float:
+        end = self.ended or datetime.now(tz=self.started.tzinfo)
+        return max(0.0, (end - self.started).total_seconds())
+
+    @property
+    def body(self) -> list[tuple[str, bool]]:
+        """Çıktı satırları: (metin, stderr mi)."""
+        return [(l, False) for l in self.out.splitlines()] + [(l, True) for l in self.err.splitlines()]
+
+    def as_json(self) -> dict:
+        return {
+            "ts": self.started.isoformat(timespec="seconds"),
+            "session": self.sid,
+            "cwd": self.cwd,
+            "branch": self.branch,
+            "subagent": self.sub,
+            "tool": self.tool,
+            "command": self.text,
+            "description": self.desc,
+            "duration_ms": round(self.dur * 1000),
+            "ok": self.ok,
+            "stdout": self.out,
+            "stderr": self.err,
+        }
+
+
+class Reader:
+    """Eşleşen transcript'leri takip eder; ('start'|'end', Cmd) olayları üretir."""
+
+    def __init__(self, root: Path, project: str | None, session: str | None,
+                 all_tools: bool, subagents: bool, stale_min: float):
+        self.root, self.project, self.session = root, project, session
+        self.all_tools, self.subagents, self.stale_min = all_tools, subagents, stale_min
+        self.offsets: dict[str, int] = {}
+        self.open: dict[str, Cmd] = {}
+        self.seen_files: set[str] = set()
+
+    # -- dosya keşfi
+    def files(self) -> Iterable[tuple[str, os.stat_result]]:
+        now = time.time()
+        for path in glob.glob(str(self.root / "*" / "*.jsonl")):
+            if self.project and self.project.lower() not in path.lower():
+                continue
+            if self.session and not os.path.basename(path).startswith(self.session):
+                continue
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            if path not in self.seen_files and now - st.st_mtime > self.stale_min * 60:
+                continue
+            yield path, st
+
+    def wanted(self, tool: str) -> bool:
+        return tool != "TodoWrite" if self.all_tools else tool == "Bash"
+
+    # -- ayrıştırma
+    def _summary(self, tool: str, inp: dict) -> str:
+        if tool == "Bash":
+            return str(inp.get("command", ""))
+        arg = inp.get("file_path") or inp.get("pattern") or inp.get("url") or inp.get("query") \
+            or inp.get("prompt") or json.dumps(inp, ensure_ascii=False)
+        return f"{tool} {clip(str(arg).replace(chr(10), ' '), 160)}"
+
+    def _result(self, entry: dict, block: dict) -> tuple[str, str, bool]:
+        tur = entry.get("toolUseResult")
+        if isinstance(tur, dict):
+            o, e = clean(tur.get("stdout", "")), clean(tur.get("stderr", ""))
+            if tur.get("interrupted"):
+                return o, (e + "\n[kesildi]").strip(), False
+            return o, e, not block.get("is_error", False)
+        content = block.get("content")
+        if isinstance(content, list):
+            content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
+        text = clean(content if isinstance(content, str) else "")
+        return ("", text, False) if block.get("is_error") else (text, "", True)
+
+    def _events(self, entry: dict) -> Iterable[tuple[str, Cmd]]:
+        content = (entry.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            return
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "tool_use":
+                tool = block.get("name", "")
+                if not self.wanted(tool):
+                    continue
+                sub = bool(entry.get("isSidechain"))
+                if sub and not self.subagents:
+                    continue
+                cmd = Cmd(
+                    uid=block.get("id", ""), sid=entry.get("sessionId", "????"),
+                    cwd=entry.get("cwd", ""), branch=entry.get("gitBranch", ""), sub=sub,
+                    tool=tool, text=self._summary(tool, block.get("input") or {}),
+                    desc=str((block.get("input") or {}).get("description", "")),
+                    started=parse_ts(entry.get("timestamp")),
+                )
+                self.open[cmd.uid] = cmd
+                yield "start", cmd
+            elif kind == "tool_result":
+                cmd = self.open.pop(block.get("tool_use_id", ""), None)
+                if not cmd:
+                    continue
+                cmd.out, cmd.err, cmd.ok = self._result(entry, block)
+                cmd.ended = parse_ts(entry.get("timestamp"))
+                yield "end", cmd
+
+    # -- okuma turu
+    def poll(self, first: bool = False, backfill: int = 0) -> list[tuple[str, Cmd]]:
+        events: list[tuple[str, Cmd]] = []
+        for path, st in self.files():
+            fresh = path not in self.seen_files
+            if fresh:
+                self.seen_files.add(path)
+                # Yeni dosya akışa sonundan katılır; geriye dönük okuma yalnız --backfill ile.
+                self.offsets[path] = 0 if (first and backfill) else st.st_size
+            if st.st_size < self.offsets[path]:      # kırpılmış / döndürülmüş
+                self.offsets[path] = 0
+            if st.st_size == self.offsets[path]:
+                continue
+            try:
+                with open(path, "r", errors="replace") as fh:
+                    fh.seek(self.offsets[path])
+                    data = fh.read()
+                    self.offsets[path] = fh.tell()
+            except OSError:
+                continue
+            lines = data.splitlines()
+            if first and backfill:
+                lines = lines[-backfill * 6:]
+            for line in lines:
+                if '"tool_use"' not in line and '"tool_result"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                events.extend(self._events(entry))
+        if first and backfill:
+            starts = [e for e in events if e[0] == "start"]
+            keep = {c.uid for _, c in starts[-backfill:]}
+            events = [(k, c) for k, c in events if c.uid in keep]
+        return events
+
+
+# ─── Akış görünümü ──────────────────────────────────────────────────────────
+
+def lane_print(console: Console, color: str, renderable: RenderableType, marker: str = " ") -> None:
+    """Her satırın başına oturum renginde şerit çubuğu yapıştırarak basar."""
+    opts = console.options.update(width=max(20, console.width - 3))
+    style = console.get_style(color)
+    first, rest = Segment(f"▌{marker} ", style), Segment("▌  ", style)
+    for i, line in enumerate(console.render_lines(renderable, opts, pad=False)):
+        console.print(Segments([first if i == 0 else rest, *line, Segment("\n")]),
+                      end="", highlight=False)
+
+
+def head_text(cmd: Cmd) -> Text:
+    t = Text(cmd.started.strftime("%H:%M:%S "), style="dim")
+    t.append(cmd.tag, style=f"bold {cmd.lane}")
+    t.append(f"  {short_path(cmd.cwd)}", style="dim")
+    if cmd.branch and cmd.branch != "HEAD":
+        t.append(f"  {cmd.branch}", style="dim italic")
+    if cmd.sub:
+        t.append("  ⤷ subagent", style="dim italic")
+    return t
+
+
+def cmd_block(cmd: Cmd, color: bool) -> RenderableType:
+    if cmd.tool != "Bash" or not color:
+        return Text(cmd.text, style="bold", overflow="fold")
+    return Syntax(cmd.text, "bash", theme="ansi_dark", word_wrap=True, background_color="default")
+
+
+def status_text(cmd: Cmd, prefix: str = "") -> Text:
+    n = len(cmd.body)
+    mark, style = ("✓", "green") if cmd.ok else ("✗", "red")
+    t = Text(prefix, style="dim")
+    t.append(mark, style=style)
+    t.append(f" {human_dur(cmd.dur)}", style="dim")
+    t.append(f" · {n} satır" if n else " · çıktı yok", style="dim")
+    return t
+
+
+class StreamView:
+    def __init__(self, console: Console, max_lines: int, show_desc: bool, show_output: bool):
+        self.c, self.max_lines, self.show_desc, self.show_output = console, max_lines, show_desc, show_output
+        self.last_uid = ""
+
+    def start(self, cmd: Cmd) -> None:
+        self.c.print()
+        self.last_uid = cmd.uid
+        lane_print(self.c, cmd.lane, head_text(cmd))
+        marker = "$" if cmd.tool == "Bash" else GLYPH.get(cmd.tool, "·")
+        lane_print(self.c, cmd.lane, cmd_block(cmd, self.c.is_terminal and not self.c.no_color), marker)
+        if self.show_desc and cmd.desc:
+            lane_print(self.c, cmd.lane, Text(f"· {cmd.desc}", style="dim italic"))
+
+    def end(self, cmd: Cmd) -> None:
+        # Paralel komutlarda çıktı başka bir başlığın altına düşebilir: yeniden çapala.
+        if cmd.uid != self.last_uid:
+            anchor = Text("↳ ", style="dim")
+            anchor.append(clip(cmd.text.replace("\n", " ⏎ "), self.c.width - 8), style="dim italic")
+            lane_print(self.c, cmd.lane, anchor)
+        self.last_uid = ""
+        if self.show_output:
+            lines = cmd.body
+            for text, is_err in lines[: self.max_lines]:
+                body = Text(clip(text, self.c.width - 6), style="red" if is_err else "dim")
+                lane_print(self.c, cmd.lane, body)
+            rest = len(lines) - self.max_lines
+            if rest > 0:
+                lane_print(self.c, cmd.lane, Text(f"… +{rest} satır", style="dim italic"))
+        lane_print(self.c, cmd.lane, status_text(cmd, "└ "))
+        self.c.file.flush()
+
+
+# ─── Pano görünümü ──────────────────────────────────────────────────────────
+
+@dataclass
+class Lane:
+    sid: str
+    cwd: str = ""
+    branch: str = ""
+    running: Cmd | None = None
+    last: Cmd | None = None
+    count: int = 0
+    seen: float = field(default_factory=time.time)
+
+
+def lane_panel(lane: Lane, height: int, width: int) -> Panel:
+    """Tek oturum şeridi: üstte komut, altta terminal gibi aşağıya yapışan çıktı kuyruğu."""
+    color = lane_of(lane.sid)
+    cmd = lane.running or lane.last
+    inner = max(10, width - 4)
+    head: list[RenderableType] = []
+    tail: list[RenderableType] = []
+    used = 0
+
+    if cmd:
+        text = clip(cmd.text.replace("\n", " ⏎ "), inner * 3)
+        head.append(Syntax(text, "bash", theme="ansi_dark", word_wrap=True, background_color="default"))
+        used += -(-len(text) // inner)                     # sarılmış komut satırı sayısı
+        if cmd.desc:
+            head.append(Text(clip(cmd.desc, inner), style="dim italic"))
+            used += 1
+        if lane.running:
+            head.append(Columns([Spinner("dots", style=color),
+                                 Text(human_dur(lane.running.dur), style=color)], padding=(0, 1)))
+            used += 1
+        tail = [Text(clip(line, inner), style="dim") for line, _ in cmd.body]
+    else:
+        head.append(Text("bekliyor…", style="dim italic"))
+        used += 1
+
+    room = max(1, height - 2 - used)
+    body = Group(*head, Align(Group(*tail[-room:]), vertical="bottom", height=room))
+
+    title = Text(f"▌{lane.sid[:4]} ", style=f"bold {color}")
+    title.append(short_path(lane.cwd), style="bold")
+    if lane.branch and lane.branch != "HEAD":
+        title.append(f" · {lane.branch}", style="dim")
+    return Panel(
+        body, title=title, title_align="left",
+        subtitle=None if lane.running else (status_text(lane.last) if lane.last else None),
+        subtitle_align="right",
+        border_style=color if lane.running else "dim",
+        height=height, width=width, padding=(0, 1),
+    )
+
+
+def dash_frame(lanes: dict[str, Lane], recent: list[Cmd], started: float,
+               total: int, console: Console, cols: int) -> RenderableType:
+    active = sorted(lanes.values(), key=lambda l: -l.seen)
+    shown, hidden = active[:cols], max(0, len(active) - cols)
+
+    header = Table.grid(expand=True)
+    header.add_column(justify="left")
+    header.add_column(justify="right")
+    left = Text("agent-stream", style="bold")
+    left.append("  pano", style="dim")
+    right = Text(f"{len(active)} oturum", style="bold")
+    if hidden:
+        right.append(f" (+{hidden} gizli)", style="dim")
+    right.append(f" · {total} komut · ↑{human_dur(time.time() - started)}", style="dim")
+    header.add_row(left, right)
+
+    height = max(9, console.height - 4 - min(len(recent), 5))
+    width = max(26, console.width // max(1, len(shown) or 1) - 1)
+    body = Columns([lane_panel(l, height, width) for l in shown], equal=True, expand=True) \
+        if shown else Panel(Text("aktif oturum yok — Claude Code'da bir komut çalıştır", style="dim italic"),
+                            border_style="dim", height=height)
+
+    tail = Table.grid(padding=(0, 1))
+    tail.add_column(style="dim", width=8)
+    tail.add_column(width=4)
+    tail.add_column(width=7, justify="right")
+    tail.add_column(overflow="ellipsis", no_wrap=True)
+    for c in recent[-5:]:
+        tail.add_row(
+            c.started.strftime("%H:%M:%S"),
+            Text(c.tag, style=f"bold {c.lane}"),
+            Text(human_dur(c.dur), style="green" if c.ok else "red"),
+            Text(clip(c.text.replace("\n", " ⏎ "), console.width - 30), style="dim"),
+        )
+    return Group(header, body, tail)
+
+
+# ─── CLI ────────────────────────────────────────────────────────────────────
+
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+    rich_markup_mode="rich",
+)
+
+
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        with open(CONFIG_PATH, "rb") as fh:
+            return tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        err_console.print(f"[yellow]uyarı:[/] {CONFIG_PATH} okunamadı ({exc}); yok sayıldı", highlight=False)
+        return {}
+
+
+def cfg_value(ctx: typer.Context, cfg: dict, name: str, value):
+    """Öncelik: bayrak > ortam değişkeni > ayar dosyası > varsayılan (clig.dev)."""
+    src = ctx.get_parameter_source(name)
+    if src is not None and src.name in ("COMMANDLINE", "ENVIRONMENT"):
+        return value
+    return cfg.get(name, value)
+
+
+def setup_console(no_color: bool) -> Console:
+    if no_color or os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+        return Console(no_color=True, highlight=False, soft_wrap=False)
+    return Console(highlight=False, soft_wrap=False)
+
+
+def version_cb(value: bool):
+    if value:
+        out_console.print(f"agent-stream {VERSION}")
+        raise typer.Exit()
+
+
+@app.callback(invoke_without_command=True)
+def stream(
+    ctx: typer.Context,
+    project: str = typer.Option(None, "-p", "--project", envvar="AGENT_STREAM_PROJECT",
+                                help="proje/cwd filtresi (parça eşleşmesi)"),
+    session: str = typer.Option(None, "-s", "--session", help="oturum etiketi öneki, örn. a3d1"),
+    all_tools: bool = typer.Option(False, "-a", "--all-tools", help="sadece Bash değil, tüm araçlar"),
+    quiet: bool = typer.Option(False, "-q", "--quiet", help="sadece komutlar, çıktı yok"),
+    max_lines: int = typer.Option(12, "-n", "--max-lines", metavar="N", help="komut başına çıktı satırı sınırı"),
+    backfill: int = typer.Option(0, "-b", "--backfill", metavar="N", help="açılışta son N komutu da göster"),
+    stale: float = typer.Option(30, "--stale", metavar="DK", help="bu süredir sessiz oturumlar atlanır"),
+    interval: float = typer.Option(0.25, "--interval", metavar="SN", help="yoklama aralığı"),
+    subagents: bool = typer.Option(True, "--subagents/--no-subagents", help="subagent şeritlerini göster"),
+    pair: bool = typer.Option(False, "--pair", help="komutu çıktısıyla birlikte, bittiğinde yaz"),
+    desc: bool = typer.Option(True, "--desc/--no-desc", help="komut açıklamasını göster"),
+    as_json: bool = typer.Option(False, "--json", help="satır satır JSON (NDJSON) yaz"),
+    no_color: bool = typer.Option(False, "--no-color", help="rengi kapat (NO_COLOR da geçerli)"),
+    root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
+    version: bool = typer.Option(False, "-V", "--version", callback=version_cb, is_eager=True,
+                                 help="sürümü yaz ve çık"),
+):
+    """
+    Claude Code oturumlarının çalıştırdığı komutları canlı akıtır.
+
+    [bold]Örnekler[/]
+      agent-stream                       tüm aktif oturumların komut akışı
+      agent-stream -p myapp -n 6         sadece myapp, komut başına 6 satır çıktı
+      agent-stream --pair -q             komutu çıktısıyla birlikte, sade
+      agent-stream dash                  paralel oturumlar için canlı pano
+      agent-stream sessions              aktif oturumları listele
+      agent-stream replay a3d1           geçmiş bir oturumu baştan oynat
+      agent-stream --json | jq -r .command    akışı makineye ver
+
+    Ayar dosyası: ~/.config/agent-stream/config.toml  ·  ortam: AGENT_STREAM_PROJECT, AGENT_STREAM_ROOT
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    raw = load_config()
+    cfg = {**raw.get("genel", {}), **raw.get("stream", {})}
+    max_lines = cfg_value(ctx, cfg, "max_lines", max_lines)
+    stale = cfg_value(ctx, cfg, "stale", stale)
+    project = cfg_value(ctx, cfg, "project", project)
+
+    if not root.is_dir():
+        die(f"{root} yok", "Claude Code bu makinede hiç çalışmamış olabilir; --root ile başka bir kök verebilirsin.")
+
+    console = setup_console(no_color)
+    reader = Reader(root, project, session, all_tools, subagents, stale)
+    view = StreamView(console, max_lines, desc, not quiet)
+
+    if not as_json:
+        scope = f"{project or 'tüm projeler'}"
+        err_console.print(f"[dim]agent-stream {VERSION} · {scope} · çıkış Ctrl+C[/]", highlight=False)
+
+    events = reader.poll(first=True, backfill=backfill)
+    while True:
+        for kind, cmd in events:
+            if as_json:
+                if kind == "end":
+                    print(json.dumps(cmd.as_json(), ensure_ascii=False), flush=True)
+            elif kind == "start":
+                if not pair:
+                    view.start(cmd)
+            else:
+                if pair:
+                    view.start(cmd)
+                view.end(cmd)
+        time.sleep(interval)
+        events = reader.poll()
+
+
+@app.command()
+def dash(
+    project: str = typer.Option(None, "-p", "--project", envvar="AGENT_STREAM_PROJECT", help="proje/cwd filtresi"),
+    session: str = typer.Option(None, "-s", "--session", help="oturum etiketi öneki"),
+    all_tools: bool = typer.Option(False, "-a", "--all-tools", help="tüm araçlar"),
+    lanes: int = typer.Option(4, "-c", "--columns", metavar="N", help="yan yana gösterilecek oturum sayısı"),
+    stale: float = typer.Option(15, "--stale", metavar="DK", help="bu süredir sessiz oturumlar atlanır"),
+    interval: float = typer.Option(0.2, "--interval", metavar="SN", help="yoklama aralığı"),
+    root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
+):
+    """Paralel oturumları yan yana şeritlerde gösteren canlı pano."""
+    if not root.is_dir():
+        die(f"{root} yok", "--root ile transcript kökünü verebilirsin.")
+    console = setup_console(False)
+    if not console.is_terminal:
+        die("pano bir terminal gerektirir", "boru hattında `agent-stream --json` kullan.", EXIT_USAGE)
+
+    reader = Reader(root, project, session, all_tools, True, stale)
+    lanes_by_sid: dict[str, Lane] = {}
+    recent: list[Cmd] = []
+    started, total = time.time(), 0
+
+    reader.poll(first=True)
+    with Live(console=console, screen=True, refresh_per_second=8, transient=True) as live:
+        while True:
+            for kind, cmd in reader.poll():
+                lane = lanes_by_sid.setdefault(cmd.sid, Lane(cmd.sid))
+                lane.cwd, lane.branch, lane.seen = cmd.cwd, cmd.branch, time.time()
+                if kind == "start":
+                    lane.running, total = cmd, total + 1
+                else:
+                    lane.running, lane.last, lane.count = None, cmd, lane.count + 1
+                    recent.append(cmd)
+                    recent[:] = recent[-20:]
+            cutoff = time.time() - stale * 60
+            for sid in [s for s, l in lanes_by_sid.items() if l.seen < cutoff]:
+                del lanes_by_sid[sid]
+            live.update(dash_frame(lanes_by_sid, recent, started, total, console, lanes))
+            time.sleep(interval)
+
+
+@app.command()
+def sessions(
+    stale: float = typer.Option(60, "--stale", metavar="DK", help="bu süredir sessiz oturumlar gizlenir"),
+    all_: bool = typer.Option(False, "--all", help="süre filtresi olmadan hepsini listele"),
+    as_json: bool = typer.Option(False, "--json", help="JSON yaz"),
+    root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
+):
+    """Aktif (ve istenirse tüm) oturumları etiketleriyle listele."""
+    if not root.is_dir():
+        die(f"{root} yok")
+    rows = []
+    for path in glob.glob(str(root / "*" / "*.jsonl")):
+        st = os.stat(path)
+        age = (time.time() - st.st_mtime) / 60
+        if not all_ and age > stale:
+            continue
+        rows.append({
+            "session": os.path.basename(path)[:-6],
+            "tag": os.path.basename(path)[:4],
+            "project": os.path.basename(os.path.dirname(path)),
+            "idle_min": round(age, 1),
+            "size_kb": round(st.st_size / 1024),
+        })
+    rows.sort(key=lambda r: r["idle_min"])
+
+    if as_json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2), flush=True)
+        return
+    if not rows:
+        err_console.print(f"[dim]son {stale:g} dakikada aktif oturum yok (--all ile hepsini gör)[/]")
+        return
+    table = Table(box=None, pad_edge=False, header_style="dim")
+    table.add_column("etiket")
+    table.add_column("proje")
+    table.add_column("boş", justify="right")
+    table.add_column("boyut", justify="right")
+    for r in rows[:40]:
+        table.add_row(
+            Text(r["tag"], style=f"bold {lane_of(r['session'])}"),
+            pretty_project(r["project"]),
+            f"{r['idle_min']:.0f} dk", f"{r['size_kb']} KB",
+        )
+    out_console.print(table)
+
+
+@app.command()
+def replay(
+    tag: str = typer.Argument(..., help="oturum etiketi ya da tam id (agent-stream sessions ile bak)"),
+    max_lines: int = typer.Option(6, "-n", "--max-lines", metavar="N", help="çıktı satır sınırı"),
+    all_tools: bool = typer.Option(False, "-a", "--all-tools", help="tüm araçlar"),
+    no_color: bool = typer.Option(False, "--no-color", help="rengi kapat"),
+    root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
+):
+    """Geçmiş bir oturumun tüm komutlarını baştan yaz (takip etmez)."""
+    matches = [p for p in glob.glob(str(root / "*" / "*.jsonl")) if os.path.basename(p).startswith(tag)]
+    if not matches:
+        die(f"'{tag}' ile başlayan oturum yok", "agent-stream sessions --all ile etiketlere bakabilirsin.")
+    if len(matches) > 1:
+        die(f"'{tag}' birden çok oturumla eşleşti", "daha uzun bir önek ver: " +
+            ", ".join(os.path.basename(m)[:8] for m in matches[:5]))
+
+    console = setup_console(no_color)
+    reader = Reader(root, None, None, all_tools, True, stale_min=float("inf"))
+    reader.seen_files.add(matches[0])
+    reader.offsets[matches[0]] = 0
+    view = StreamView(console, max_lines, True, True)
+    for kind, cmd in reader.poll():
+        if kind == "end":          # oynatma canlı değil: komut çıktısıyla bitişik kalsın
+            view.start(cmd)
+            view.end(cmd)
+
+
+app.command("stream", help="Komutları ve çıktılarını akış halinde yaz (varsayılan görünüm).")(stream)
+
+
+if __name__ == "__main__":
+    try:
+        app()
+    except KeyboardInterrupt:
+        err_console.print("\n[dim]durduruldu[/]")
+        sys.exit(EXIT_SIGINT)
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(EXIT_OK)

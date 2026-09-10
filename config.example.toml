@@ -1,0 +1,6 @@
+# ~/.config/agent-stream/config.toml olarak kopyala.
+# Bayrak ve ortam değişkeni bu dosyayı ezer.
+[genel]
+project = "myapp"   # varsayılan proje filtresi
+max_lines = 8       # komut başına çıktı satırı
+stale = 45          # kaç dakikadır sessiz oturumlar atlanır
