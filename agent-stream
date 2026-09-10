@@ -318,10 +318,15 @@ def head_text(cmd: Cmd) -> Text:
     return t
 
 
-def cmd_block(cmd: Cmd, color: bool) -> RenderableType:
+def cmd_block(cmd: Cmd, color: bool, max_cmd: int = 0) -> RenderableType:
+    """Komut bloğu; heredoc'lu komutlar `max_cmd` satırda kırpılır (0 = sınırsız)."""
+    text = cmd.text
+    lines = text.splitlines()
+    if max_cmd and len(lines) > max_cmd:
+        text = "\n".join(lines[:max_cmd]) + f"\n… +{len(lines) - max_cmd} satır komut"
     if cmd.tool != "Bash" or not color:
-        return Text(cmd.text, style="bold", overflow="fold")
-    return Syntax(cmd.text, "bash", theme="ansi_dark", word_wrap=True, background_color="default")
+        return Text(text, style="bold", overflow="fold")
+    return Syntax(text, "bash", theme="ansi_dark", word_wrap=True, background_color="default")
 
 
 def status_text(cmd: Cmd, prefix: str = "") -> Text:
@@ -335,8 +340,10 @@ def status_text(cmd: Cmd, prefix: str = "") -> Text:
 
 
 class StreamView:
-    def __init__(self, console: Console, max_lines: int, show_desc: bool, show_output: bool):
+    def __init__(self, console: Console, max_lines: int, show_desc: bool, show_output: bool,
+                 max_cmd: int = 10):
         self.c, self.max_lines, self.show_desc, self.show_output = console, max_lines, show_desc, show_output
+        self.max_cmd = max_cmd
         self.last_uid = ""
 
     def start(self, cmd: Cmd) -> None:
@@ -344,7 +351,8 @@ class StreamView:
         self.last_uid = cmd.uid
         lane_print(self.c, cmd.lane, head_text(cmd))
         marker = "$" if cmd.tool == "Bash" else GLYPH.get(cmd.tool, "·")
-        lane_print(self.c, cmd.lane, cmd_block(cmd, self.c.is_terminal and not self.c.no_color), marker)
+        color = self.c.is_terminal and not self.c.no_color
+        lane_print(self.c, cmd.lane, cmd_block(cmd, color, self.max_cmd), marker)
         if self.show_desc and cmd.desc:
             lane_print(self.c, cmd.lane, Text(f"· {cmd.desc}", style="dim italic"))
 
@@ -508,6 +516,7 @@ def stream(
     all_tools: bool = typer.Option(False, "-a", "--all-tools", help="sadece Bash değil, tüm araçlar"),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="sadece komutlar, çıktı yok"),
     max_lines: int = typer.Option(12, "-n", "--max-lines", metavar="N", help="komut başına çıktı satırı sınırı"),
+    max_cmd: int = typer.Option(10, "-m", "--max-cmd", metavar="N", help="komut bloğu satır sınırı (0 = sınırsız)"),
     backfill: int = typer.Option(0, "-b", "--backfill", metavar="N", help="açılışta son N komutu da göster"),
     stale: float = typer.Option(30, "--stale", metavar="DK", help="bu süredir sessiz oturumlar atlanır"),
     interval: float = typer.Option(0.25, "--interval", metavar="SN", help="yoklama aralığı"),
@@ -539,6 +548,7 @@ def stream(
     raw = load_config()
     cfg = {**raw.get("genel", {}), **raw.get("stream", {})}
     max_lines = cfg_value(ctx, cfg, "max_lines", max_lines)
+    max_cmd = cfg_value(ctx, cfg, "max_cmd", max_cmd)
     stale = cfg_value(ctx, cfg, "stale", stale)
     project = cfg_value(ctx, cfg, "project", project)
 
@@ -547,7 +557,7 @@ def stream(
 
     console = setup_console(no_color)
     reader = Reader(root, project, session, all_tools, subagents, stale)
-    view = StreamView(console, max_lines, desc, not quiet)
+    view = StreamView(console, max_lines, desc, not quiet, max_cmd)
 
     if not as_json:
         scope = f"{project or 'tüm projeler'}"
@@ -660,6 +670,7 @@ def sessions(
 def replay(
     tag: str = typer.Argument(..., help="oturum etiketi ya da tam id (agent-stream sessions ile bak)"),
     max_lines: int = typer.Option(6, "-n", "--max-lines", metavar="N", help="çıktı satır sınırı"),
+    max_cmd: int = typer.Option(10, "-m", "--max-cmd", metavar="N", help="komut bloğu satır sınırı (0 = sınırsız)"),
     all_tools: bool = typer.Option(False, "-a", "--all-tools", help="tüm araçlar"),
     no_color: bool = typer.Option(False, "--no-color", help="rengi kapat"),
     root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
@@ -676,7 +687,7 @@ def replay(
     reader = Reader(root, None, None, all_tools, True, stale_min=float("inf"))
     reader.seen_files.add(matches[0])
     reader.offsets[matches[0]] = 0
-    view = StreamView(console, max_lines, True, True)
+    view = StreamView(console, max_lines, True, True, max_cmd)
     for kind, cmd in reader.poll():
         if kind == "end":          # oynatma canlı değil: komut çıktısıyla bitişik kalsın
             view.start(cmd)

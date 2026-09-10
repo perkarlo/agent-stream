@@ -28,6 +28,7 @@ Her oturumun 4 karakterlik bir etiketi (`a3d1`) ve id'sinden türeyen sabit bir 
 astream -p myapp -n 6          # sadece myapp projesi, komut başına 6 satır çıktı
 astream -s a3d1                # tek oturum
 astream -q                     # sadece komutlar, çıktı yok
+astream -m 4                   # uzun heredoc komutlarını 4 satırda kır (0 = sınırsız)
 astream -a                     # Bash dışındaki araçlar da (Read, Edit, Grep, Task…)
 astream -b 20                  # açılışta son 20 komutu da göster
 astream --json | jq -r .command   # NDJSON, satır başına bir tamamlanmış komut

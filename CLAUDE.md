@@ -75,6 +75,7 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `lane_print` | `console.print(Segments([bar, *line, Segment("\n")]), end="")` | Rich'te `print(a, b)` iki renderable'ı ayrı blok basar, çubuk kendi satırına düşerdi. Newline'ı segment listesine elle koymak satırı bir arada tutan tek yol |
 | `lane_print` | `first` / `rest` çubukları | Komutun `$` işareti çubuğa biner; sarılan satırlar aynı kolondan devam eder |
 | `StreamView.end` | `if cmd.uid != self.last_uid` | Paralel araç çağrılarında çıktı başka komutun başlığı altına düşüyordu; `↳` ile yeniden çapalanır |
+| `cmd_block` | `max_cmd` kırpması | Heredoc'lu komutlar 60+ satır olabiliyor; `-q` çıktıyı kapatsa bile ekranı komut bloğunun kendisi dolduruyordu (10.09'da canlı akışta görüldü) |
 | `StreamView.end` | `self.c.file.flush()` | Rich boru hattında tamponlar; `agent-stream \| grep` canlı kalmalı |
 | `Reader.poll` | `'"tool_use"' not in line` ön elemesi | 10 MB'lık transcript'te satır başına `json.loads` pahalı; ilgisiz satırlar string testiyle elenir |
 | `Reader.poll` | `lines[-backfill * 6:]` + keep-set | Bir komut birkaç JSONL satırı eder; kaba pencere alınıp sonunda olay sayısına indirilir |
