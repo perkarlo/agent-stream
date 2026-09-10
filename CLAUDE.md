@@ -40,6 +40,7 @@ Bunlar bilinçli kararlar. Değiştirmeden önce burada neden yazdığına bak.
 | 9 | Kişisel yol sabit yazılmaz | Proje adı `HOME`'dan türetilir (`pretty_project`). Başka makinede de doğru okunmalı |
 | 10 | Varsayılan **tüm araçlar** | Oturumun ne yaptığı yalnız Bash'ten okunmuyor; Read/Edit/MCP çağrıları da akışın parçası (kullanıcı kararı, 10.09). `-B/--bash-only` daraltır, `TodoWrite` her hâlükârda elenir |
 | 11 | Ayar önceliği ölçülür, tahmin edilmez | `ctx.get_parameter_source` ile: bayrak > ortam > dosya > varsayılan (clig.dev) |
+| 12 | Ayar dosyası **her** alt komutta okunur | `merged_config(ctx)`: `[genel]` + alt komutun kendi bölümü. Yalnız `stream`'de okunması, `theme` yazan kullanıcıya panoda başka renk gösteriyordu |
 
 ## Python Standartları
 
@@ -81,7 +82,7 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `Reader.poll` | `'"tool_use"' not in line` ön elemesi | 10 MB'lık transcript'te satır başına `json.loads` pahalı; ilgisiz satırlar string testiyle elenir |
 | `Reader.poll` | `lines[-backfill * 6:]` + keep-set | Bir komut birkaç JSONL satırı eder; kaba pencere alınıp sonunda olay sayısına indirilir |
 | `Reader.files` | Stale filtresi yalnız **yeni** dosyaya | Takip edilen bir oturum sessizleşince akıştan düşmemeli |
-| `cmd_block` / `lane_panel` | `theme=THEME`, varsayılan `ansi_dark` | ANSI teması rengi terminalin paletinden alır: aynı çıktı bir terminalde yeşil, başkasında mavi görünür. Sabit tema isteyen `--theme` ile pinler; varsayılanı değiştirmek herkesin terminal profilini ezmek olurdu |
+| `cmd_block` / `lane_panel` | `theme=THEME`, varsayılan `monokai` | `ansi_dark` rengi terminal paletinden alıyordu: tek renkli bir profilde (yeşil üstü siyah gibi) komutun her parçası aynı tonda çıkıyor, boyama bilgi taşımıyordu. Sabit tema iki terminalde de aynı; palet mirası isteyen `--theme ansi_dark` der |
 | `pretty_tool` | `UUID` sunucu adı → `mcp:` | Konnektör MCP sunucuları 36 karakterlik uuid adı taşıyor; ham hâli komut satırının yarısını yiyordu |
 | `_result` | `"stdout" in tur` koşulu | `toolUseResult` yalnız Bash'te `stdout`/`stderr` taşıyor; Read/Edit/MCP sonuçları `tool_result` bloğunda. Koşulsuz `tur.get("stdout")` bütün Bash dışı araçlara "çıktı yok" dedirtiyordu (10.09, tüm araçlar varsayılan olduktan sonra görüldü) |
 | `clean` | `SYSREM` deseni | `tool_result` içine eklenen `<system-reminder>` blokları kullanıcının komut çıktısı değil |

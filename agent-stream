@@ -62,7 +62,7 @@ GLYPH = {
     "Skill": "◇", "SlashCommand": "◇", "Artifact": "▤", "TodoWrite": "☑",
 }
 
-THEME = "ansi_dark"                 # komut bloğunun renk teması; --theme ile değişir
+THEME = "monokai"                   # komut bloğunun renk teması; --theme ile değişir
 
 out_console = Console()             # veri → stdout
 err_console = Console(stderr=True)  # banner, uyarı, hata → stderr
@@ -523,6 +523,12 @@ def load_config() -> dict:
         return {}
 
 
+def merged_config(ctx: typer.Context) -> dict:
+    """`[genel]` + alt komutun kendi bölümü; alt komut bölümü üstte."""
+    raw = load_config()
+    return {**raw.get("genel", {}), **raw.get(ctx.command.name or "", {})}
+
+
 def cfg_value(ctx: typer.Context, cfg: dict, name: str, value):
     """Öncelik: bayrak > ortam değişkeni > ayar dosyası > varsayılan (clig.dev)."""
     src = ctx.get_parameter_source(name)
@@ -561,8 +567,8 @@ def stream(
     pair: bool = typer.Option(False, "--pair", help="komutu çıktısıyla birlikte, bittiğinde yaz"),
     desc: bool = typer.Option(True, "--desc/--no-desc", help="komut açıklamasını göster"),
     as_json: bool = typer.Option(False, "--json", help="satır satır JSON (NDJSON) yaz"),
-    theme: str = typer.Option("ansi_dark", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
-                              help="komut bloğu teması (ansi_dark, monokai, dracula, nord…)"),
+    theme: str = typer.Option("monokai", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
+                              help="komut bloğu teması (monokai, dracula, nord, ansi_dark…)"),
     no_color: bool = typer.Option(False, "--no-color", help="rengi kapat (NO_COLOR da geçerli)"),
     root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
     version: bool = typer.Option(False, "-V", "--version", callback=version_cb, is_eager=True,
@@ -584,8 +590,7 @@ def stream(
     """
     if ctx.invoked_subcommand is not None:
         return
-    raw = load_config()
-    cfg = {**raw.get("genel", {}), **raw.get("stream", {})}
+    cfg = merged_config(ctx)
     max_lines = cfg_value(ctx, cfg, "max_lines", max_lines)
     max_cmd = cfg_value(ctx, cfg, "max_cmd", max_cmd)
     stale = cfg_value(ctx, cfg, "stale", stale)
@@ -622,12 +627,13 @@ def stream(
 
 @app.command()
 def dash(
+    ctx: typer.Context,
     project: str = typer.Option(None, "-p", "--project", envvar="AGENT_STREAM_PROJECT", help="proje/cwd filtresi"),
     session: str = typer.Option(None, "-s", "--session", help="oturum etiketi öneki"),
     all_tools: bool = typer.Option(True, "--all-tools/--bash-only", "-a/-B",
                                    help="tüm araçlar (varsayılan) / yalnız Bash"),
-    theme: str = typer.Option("ansi_dark", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
-                              help="komut bloğu teması (ansi_dark, monokai, dracula, nord…)"),
+    theme: str = typer.Option("monokai", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
+                              help="komut bloğu teması (monokai, dracula, nord, ansi_dark…)"),
     lanes: int = typer.Option(4, "-c", "--columns", metavar="N", help="yan yana gösterilecek oturum sayısı"),
     max_cmd: int = typer.Option(4, "-m", "--max-cmd", metavar="N", help="şeritteki komut satırı sınırı"),
     stale: float = typer.Option(15, "--stale", metavar="DK", help="bu süredir sessiz oturumlar atlanır"),
@@ -635,7 +641,11 @@ def dash(
     root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
 ):
     """Paralel oturumları yan yana şeritlerde gösteren canlı pano."""
-    set_theme(theme)
+    cfg = merged_config(ctx)
+    project = cfg_value(ctx, cfg, "project", project)
+    stale = cfg_value(ctx, cfg, "stale", stale)
+    max_cmd = cfg_value(ctx, cfg, "max_cmd", max_cmd)
+    set_theme(cfg_value(ctx, cfg, "theme", theme))
     if not root.is_dir():
         die(f"{root} yok", "--root ile transcript kökünü verebilirsin.")
     console = setup_console(False)
@@ -668,12 +678,14 @@ def dash(
 
 @app.command()
 def sessions(
+    ctx: typer.Context,
     stale: float = typer.Option(60, "--stale", metavar="DK", help="bu süredir sessiz oturumlar gizlenir"),
     all_: bool = typer.Option(False, "--all", help="süre filtresi olmadan hepsini listele"),
     as_json: bool = typer.Option(False, "--json", help="JSON yaz"),
     root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
 ):
     """Aktif (ve istenirse tüm) oturumları etiketleriyle listele."""
+    stale = cfg_value(ctx, merged_config(ctx), "stale", stale)
     if not root.is_dir():
         die(f"{root} yok")
     rows = []
@@ -713,18 +725,22 @@ def sessions(
 
 @app.command()
 def replay(
+    ctx: typer.Context,
     tag: str = typer.Argument(..., help="oturum etiketi ya da tam id (agent-stream sessions ile bak)"),
     max_lines: int = typer.Option(6, "-n", "--max-lines", metavar="N", help="çıktı satır sınırı"),
     max_cmd: int = typer.Option(10, "-m", "--max-cmd", metavar="N", help="komut bloğu satır sınırı (0 = sınırsız)"),
     all_tools: bool = typer.Option(True, "--all-tools/--bash-only", "-a/-B",
                                    help="tüm araçlar (varsayılan) / yalnız Bash"),
-    theme: str = typer.Option("ansi_dark", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
-                              help="komut bloğu teması (ansi_dark, monokai, dracula, nord…)"),
+    theme: str = typer.Option("monokai", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
+                              help="komut bloğu teması (monokai, dracula, nord, ansi_dark…)"),
     no_color: bool = typer.Option(False, "--no-color", help="rengi kapat"),
     root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
 ):
     """Geçmiş bir oturumun tüm komutlarını baştan yaz (takip etmez)."""
-    set_theme(theme)
+    cfg = merged_config(ctx)
+    max_lines = cfg_value(ctx, cfg, "max_lines", max_lines)
+    max_cmd = cfg_value(ctx, cfg, "max_cmd", max_cmd)
+    set_theme(cfg_value(ctx, cfg, "theme", theme))
     matches = [p for p in glob.glob(str(root / "*" / "*.jsonl")) if os.path.basename(p).startswith(tag)]
     if not matches:
         die(f"'{tag}' ile başlayan oturum yok", "agent-stream sessions --all ile etiketlere bakabilirsin.")

@@ -33,7 +33,7 @@ astream -s a3d1                # tek oturum
 astream -q                     # sadece komutlar, çıktı yok
 astream -m 4                   # uzun heredoc komutlarını 4 satırda kır (0 = sınırsız)
 astream -B                     # yalnız Bash (varsayılan: Read, Edit, Grep, Task, MCP dahil hepsi)
-astream --theme monokai        # komut bloğu teması: monokai, dracula, nord, github-dark…
+astream --theme ansi_dark      # komut bloğu teması (varsayılan monokai): nord, dracula, ansi_dark…
 astream -b 20                  # açılışta son 20 komutu da göster
 astream --json | jq -r .command   # NDJSON, satır başına bir tamamlanmış komut
 ```
@@ -62,9 +62,12 @@ stale = 45
 theme = "monokai"
 ```
 
-Varsayılan tema `ansi_dark`: renkleri terminalin kendi paletinden alır, yani bir terminalde
-yeşil, VS Code'da mavi görünür. Sabit bir tema (`monokai`, `nord`, `dracula`…) her terminalde
-aynı çıkar; 24 bit renk desteklemeyen terminallerde en yakın renge yuvarlanır.
+Varsayılan tema `monokai`: her terminalde aynı çıkar, 24 bit renk desteklemeyen terminallerde
+en yakın renge yuvarlanır. `ansi_dark` renkleri terminalin kendi paletinden alır; tek renkli bir
+profilde (yeşil üstü siyah gibi) sözdizimi boyaması bilgi taşımaz, o yüzden varsayılan değil.
+
+Ayar dosyası `[genel]` bölümünün yanında alt komut bölümü de kabul eder (`[stream]`, `[dash]`,
+`[sessions]`, `[replay]`); alt komut bölümü `[genel]`i ezer, bayrak ve ortam değişkeni ikisini de.
 
 ## Sınırlar
 
