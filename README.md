@@ -15,7 +15,7 @@ asdash                        # paralel oturumlar için canlı pano
 | --- | --- |
 | `astream` | komut çalıştığı an başlığıyla düşer, çıktısı bitince altına eklenir |
 | `astream --pair` | komutu çıktısıyla birlikte, bittiğinde tek blok halinde yazar |
-| `astream dash` | oturumları yan yana şeritlerde gösterir; çalışan komutta spinner, altta son 5 komut |
+| `astream dash` | oturumları yan yana şeritlerde gösterir; çalışan komutta spinner, altta son 5 komut. Komut ilk 4 satırıyla durur (`-m`) |
 | `astream sessions` | aktif oturumlar: etiket, proje, boşta kalma süresi |
 | `astream replay a3d1` | geçmiş bir oturumun tüm komutlarını baştan yazar |
 

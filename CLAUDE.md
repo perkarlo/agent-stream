@@ -86,6 +86,7 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `_result` | `"stdout" in tur` koşulu | `toolUseResult` yalnız Bash'te `stdout`/`stderr` taşıyor; Read/Edit/MCP sonuçları `tool_result` bloğunda. Koşulsuz `tur.get("stdout")` bütün Bash dışı araçlara "çıktı yok" dedirtiyordu (10.09, tüm araçlar varsayılan olduktan sonra görüldü) |
 | `clean` | `SYSREM` deseni | `tool_result` içine eklenen `<system-reminder>` blokları kullanıcının komut çıktısı değil |
 | `parse_ts` | `.replace("Z", "+00:00").astimezone()` | Transcript UTC yazar; ekranda yerel saat okunur |
+| `lane_panel` | Komut satır satır, `max_cmd` ile kırpık | İlk tasarım satır sonlarını ` ⏎ ` ile birleştirip tek satıra sıkıştırıyordu; heredoc'lu komutlar şeritte okunmaz oluyordu (10.09 panoda görüldü) |
 | `lane_panel` | Çıktı kuyruğu komutun hemen altında | Dibe yapıştırılınca (ilk tasarım) uzun terminalde komut ile çıktısı arasında ekran boyu boşluk kalıyordu; kuyruk yine son satırlar, ama başlığa bitişik |
 | `lane_panel` | `Panel(..., width=width)` | Genişlik verilmezse `Columns` panelleri yan yana değil alt alta yığar |
 | `lane_panel` | Spinner gövdede, özet altyazıda | `Panel(subtitle=…)` yalnız metin kabul eder; `Columns` altyazıya konursa `AttributeError` |

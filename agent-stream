@@ -421,7 +421,7 @@ class Lane:
     seen: float = field(default_factory=time.time)
 
 
-def lane_panel(lane: Lane, height: int, width: int) -> Panel:
+def lane_panel(lane: Lane, height: int, width: int, max_cmd: int = 4) -> Panel:
     """Tek oturum şeridi: üstte komut, altta terminal gibi aşağıya yapışan çıktı kuyruğu."""
     color = lane_of(lane.sid)
     cmd = lane.running or lane.last
@@ -431,9 +431,12 @@ def lane_panel(lane: Lane, height: int, width: int) -> Panel:
     used = 0
 
     if cmd:
-        text = clip(cmd.text.replace("\n", " ⏎ "), inner * 3)
+        # Komut şeritte de satır satır durur; heredoc tek satıra sıkıştırılınca okunmuyordu.
+        rows = [clip(l, inner * 2) for l in (cmd.text.splitlines() or [""])[:max_cmd]]
+        extra = len(cmd.text.splitlines()) - max_cmd
+        text = "\n".join(rows) + (f"\n… +{extra} satır komut" if extra > 0 else "")
         head.append(Syntax(text, "bash", theme=THEME, word_wrap=True, background_color="default"))
-        used += -(-len(text) // inner)                     # sarılmış komut satırı sayısı
+        used += sum(-(-len(l) // inner) or 1 for l in text.splitlines())
         if cmd.desc:
             head.append(Text(clip(cmd.desc, inner), style="dim italic"))
             used += 1
@@ -463,7 +466,7 @@ def lane_panel(lane: Lane, height: int, width: int) -> Panel:
 
 
 def dash_frame(lanes: dict[str, Lane], recent: list[Cmd], started: float,
-               total: int, console: Console, cols: int) -> RenderableType:
+               total: int, console: Console, cols: int, max_cmd: int = 4) -> RenderableType:
     active = sorted(lanes.values(), key=lambda l: -l.seen)
     shown, hidden = active[:cols], max(0, len(active) - cols)
 
@@ -480,7 +483,7 @@ def dash_frame(lanes: dict[str, Lane], recent: list[Cmd], started: float,
 
     height = max(9, console.height - 4 - min(len(recent), 5))
     width = max(26, console.width // max(1, len(shown) or 1) - 1)
-    body = Columns([lane_panel(l, height, width) for l in shown], equal=True, expand=True) \
+    body = Columns([lane_panel(l, height, width, max_cmd) for l in shown], equal=True, expand=True) \
         if shown else Panel(Text("aktif oturum yok — Claude Code'da bir komut çalıştır", style="dim italic"),
                             border_style="dim", height=height)
 
@@ -626,6 +629,7 @@ def dash(
     theme: str = typer.Option("ansi_dark", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
                               help="komut bloğu teması (ansi_dark, monokai, dracula, nord…)"),
     lanes: int = typer.Option(4, "-c", "--columns", metavar="N", help="yan yana gösterilecek oturum sayısı"),
+    max_cmd: int = typer.Option(4, "-m", "--max-cmd", metavar="N", help="şeritteki komut satırı sınırı"),
     stale: float = typer.Option(15, "--stale", metavar="DK", help="bu süredir sessiz oturumlar atlanır"),
     interval: float = typer.Option(0.2, "--interval", metavar="SN", help="yoklama aralığı"),
     root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
@@ -658,7 +662,7 @@ def dash(
             cutoff = time.time() - stale * 60
             for sid in [s for s, l in lanes_by_sid.items() if l.seen < cutoff]:
                 del lanes_by_sid[sid]
-            live.update(dash_frame(lanes_by_sid, recent, started, total, console, lanes))
+            live.update(dash_frame(lanes_by_sid, recent, started, total, console, lanes, max_cmd))
             time.sleep(interval)
 
 
