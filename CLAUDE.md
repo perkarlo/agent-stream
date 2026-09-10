@@ -12,6 +12,7 @@ dosyalık Python CLI. Kaynak, oturumların kendi yazdığı transcript'ler:
 ```
 .
 ├── agent-stream                # tek çalıştırılabilir; tüm kod burada
+├── bench/bench.py              # ölçüm takımı: boşta CPU, tarama, kare maliyeti
 ├── README.md                   # kullanıcı dokümanı (görünümler, bayraklar, ayar)
 ├── CLAUDE.md                   # bu dosya
 ├── config.example.toml         # ~/.config/agent-stream/config.toml örneği
@@ -40,11 +41,17 @@ Bunlar bilinçli kararlar. Değiştirmeden önce burada neden yazdığına bak.
 | 9 | Kişisel yol sabit yazılmaz | Proje adı `HOME`'dan türetilir (`pretty_project`). Başka makinede de doğru okunmalı |
 | 10 | Varsayılan **tüm araçlar** | Oturumun ne yaptığı yalnız Bash'ten okunmuyor; Read/Edit/MCP çağrıları da akışın parçası (kullanıcı kararı, 10.09). `-B/--bash-only` daraltır, `TodoWrite` her hâlükârda elenir |
 | 11 | Ayar önceliği ölçülür, tahmin edilmez | `ctx.get_parameter_source` ile: bayrak > ortam > dosya > varsayılan (clig.dev) |
-| 12 | Ayar dosyası **her** alt komutta okunur | `merged_config(ctx)`: `[genel]` + alt komutun kendi bölümü. Yalnız `stream`'de okunması, `theme` yazan kullanıcıya panoda başka renk gösteriyordu |
+| 12 | İzleme olay tabanlı, yoklama **fallback** | Çekirdek uyandırır (kqueue/inotify); yoklama yalnız ikisi de kurulamayınca. Fallback opsiyonel değil: ağ dosya sistemleri ve BSD/Linux dışı ortamlar için tek çıkış yolu |
+| 13 | Pano yalnız **değişiklikte** çizer | Durum değişmediyse kare üretilmez; koşan komut varken spinner için 4 fps, boşta 5 sn'de bir. Koşulsuz 8 fps %8,8 CPU tutuyordu |
+| 14 | Ölçüm süreç **içinden** yapılır | `time.process_time`, sabit duvar penceresi. `RUSAGE_CHILDREN` yorumlayıcı açılışını da sayar ve boş kökte bile %1,9 gösterir |
+| 15 | Ayar dosyası **her** alt komutta okunur | `merged_config(ctx)`: `[genel]` + alt komutun kendi bölümü. Yalnız `stream`'de okunması, `theme` yazan kullanıcıya panoda başka renk gösteriyordu |
 
 ## Python Standartları
 
-Tek dosya, PEP 723 inline bağımlılık bloğu (`typer`, `rich`), shebang `uv run --script`.
+Tek dosya, PEP 723 inline bağımlılık bloğu (`rich`), shebang `uv run --script`. Argüman
+ayrıştırma stdlib `argparse` ile: typer tek başına açılışa 34 ms ekliyordu. Ağır modüller
+(`rich.syntax`/pygments, `rich.live`, `rich.panel`, `ctypes`) kullanıldıkları fonksiyonun içinde
+içe aktarılır; `--json` yolu pygments'i hiç yüklemez.
 Yeni bağımlılık eklemek = shebang bloğunu güncellemek; `checks.sh` import ile listeyi karşılaştırır.
 Kullanıcıya giden her metin Türkçe; kod yorumu da Türkçe ve tek satır.
 
@@ -68,6 +75,20 @@ Kullanıcıya giden her metin Türkçe; kod yorumu da Türkçe ve tek satır.
 | `agent-stream sessions` | `sessions` | Etiket, proje, boşta kalma, boyut |
 | `agent-stream replay <etiket>` | `replay` | Takip etmez; komut ve çıktısını eşli basar |
 
+## İzleyici Katmanı
+
+Üçü de aynı sözleşme: `sync(dirs, files)` izlenecek kümeyi kurar, `wait(timeout)` bir şey olana
+kadar bloklar ve `(uyandı mı, tarama gerekli mi)` döner, `close()` biriktirdiği fd'leri bırakır.
+
+| Arka uç | Nerede | Ne izler | Not |
+| --- | --- | --- | --- |
+| `KqueueWatcher` | macOS/BSD | dizinler + takip edilen dosyalar | Dosya başına fd gerekir; `WATCH_CAP` üst sınır |
+| `InotifyWatcher` | Linux | yalnız dizinler | İçindeki dosyaların olayı adıyla geldiği için dosya izlemeye gerek yok; libc'ye ctypes ile bağlanır, bağımlılık eklemez |
+| `PollWatcher` | her yer | hiçbir şey | Uyur; tarama zamanlamasını `Reader` yapar, boşta kaldıkça aralık `IDLE_STEPS` merdiveninden büyür |
+
+`make_watcher()` sırayla dener, kurulamayanı sessizce atlar; `AGENT_STREAM_WATCH` ile zorlanır.
+Olay arka ucunda güvenlik taraması 30 sn'de bir (`EVENT_RESCAN`), yoklamada 5 sn (`SAFETY_RESCAN`).
+
 ## Savunma Satırları
 
 Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirmeden önce oku.
@@ -82,7 +103,12 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `Reader.poll` | `'"tool_use"' not in line` ön elemesi | 10 MB'lık transcript'te satır başına `json.loads` pahalı; ilgisiz satırlar string testiyle elenir |
 | `Reader.poll` | `lines[-backfill * 6:]` + keep-set | Bir komut birkaç JSONL satırı eder; kaba pencere alınıp sonunda olay sayısına indirilir |
 | `Reader.files` | `subagents/**` glob'u | Subagent'lar ana transcript'e yazmıyor, `<proje>/<oturum>/subagents/agent-*.jsonl` altında ayrı dosyalarda duruyor. Eski glob (`*/*.jsonl`) onları hiç görmüyordu; `--no-subagents` bayrağı da bu yüzden boşa çalışıyordu (10.09) |
-| `Reader.files` | `full = now - self._scanned > self.rescan` | 2202 dosyayı 250 ms'de bir globlamak tur başına 19 ms yiyordu. Tam tarama 2 sn'de bir, ara turlarda yalnız takip edilen dosyalar: 0.01 ms. Bedeli, yeni bir oturumun akışa 2 sn gecikmeyle girmesi |
+| `Reader._walk` | `scandir` + `FRESH` filtresi | Özyinelemeli `glob` 2.202 dosyada 20,4 ms tutuyordu; `scandir` 10,9 ms, yedi günden eski proje dizinlerine hiç inmemek 7,2 ms |
+| `Reader.files` | `full = ... > self.rescan` | Ara turlarda yalnız takip edilen dosyalara `stat` atılır. Tam tarama olay arka ucunda 30 sn'de bir yeter: yeni dosyayı dizin olayı zaten söylüyor. 5 sn'de bir taramak boşta CPU'yu %0,04'ten %0,17'ye çıkarıyordu |
+| `InotifyWatcher.sync` | yalnız dizinleri izler | Linux'ta bir dizin izlendiğinde içindeki dosyaların `IN_MODIFY` olayları da adıyla geliyor; dosya başına watch açmak gereksiz ve pahalı olurdu |
+| `InotifyWatcher._drain` | `struct.unpack_from("iIII")` | inotify olayı 16 baytlık başlık + hizalanmış ad; `len` alanı okunmadan bir sonraki olaya atlanamaz |
+| `highlight` | `_HL` önbelleği | Pygments boyaması şerit başına 0,55 ms; pano saniyede 4 kez çiziyor. Önbellek tema değişince temizlenir |
+| `dash_frame` | `parts` tek geçişte | Yükseklik ölçümü ve çizim aynı `lane_parts` sonucunu kullanır; iki kez hesaplamak kare maliyetini 12 ms'den 4,9 ms'ye düşürdü |
 | `Reader.files` | Stale filtresi yalnız **yeni** dosyaya | Takip edilen bir oturum sessizleşince akıştan düşmemeli |
 | `cmd_block` / `lane_panel` | `theme=THEME`, varsayılan `monokai` | `ansi_dark` rengi terminal paletinden alıyordu: tek renkli bir profilde (yeşil üstü siyah gibi) komutun her parçası aynı tonda çıkıyor, boyama bilgi taşımıyordu. Sabit tema iki terminalde de aynı; palet mirası isteyen `--theme ansi_dark` der |
 | `clip` | `cell_len` / `set_cell_size` | `len()` karakter sayıyordu: emoji ve CJK iki hücre kaplar, `🔴 …  ✅` satırı 36 karakter ama 38 hücre. Sarma noktası kayıp satır taşıyordu |

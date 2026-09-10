@@ -40,8 +40,7 @@ else
 fi
 
 # ─── 4. Alt komutlar dokümanlarda geçmeli ───────────────────────────────────
-subs=$(awk '/^@app\.command\(/{getline; if ($0 ~ /^def /) {sub(/^def /,""); sub(/\(.*/,""); print}}' agent-stream)
-subs="stream $subs"
+subs=$(grep -oE 'add_parser\("[a-z]+"' agent-stream | sed 's/add_parser("//; s/"//' | sort -u)
 missing=""
 for s in $subs; do
   grep -q -- "$s" README.md && grep -q -- "$s" CLAUDE.md || missing="$missing $s"
@@ -59,7 +58,7 @@ deps=$(sed -n 's/^# dependencies = \[\(.*\)\]$/\1/p' agent-stream | tr -d '"' | 
 undeclared=""
 for mod in $(grep -oE '^(import|from) [a-z_]+' agent-stream | awk '{print $2}' | sort -u); do
   case "$mod" in
-    __future__|dataclasses|datetime|glob|json|os|pathlib|re|sys|time|tomllib|typing) continue ;;
+    __future__|argparse|dataclasses|datetime|glob|json|os|pathlib|re|select|struct|sys|time|tomllib|typing) continue ;;
   esac
   echo "$deps" | grep -qx "$mod" || undeclared="$undeclared $mod"
 done
@@ -80,6 +79,18 @@ if grep -q "130" README.md && grep -q "130" CLAUDE.md; then
 else
   fail "çıkış kodu sözleşmesi eksik" \
        "0 başarı · 1 hata · 2 kullanım · 130 Ctrl+C; EXIT_* sabitleri tek kaynak."
+fi
+
+# ─── 7. İzleyici arka uçları belgeli olmalı ─────────────────────────────────
+missing_w=""
+for w in kqueue inotify poll; do
+  grep -q "$w" README.md && grep -q "$w" CLAUDE.md || missing_w="$missing_w $w"
+done
+if [ -z "$missing_w" ]; then
+  ok "izleyici arka uçları iki dokümanda da yazılı: kqueue inotify poll"
+else
+  fail "dokümanda geçmeyen arka uç:$missing_w" \
+       "Arka uç eklendiyse README kaynak tüketimi bölümü ve CLAUDE.md izleyici tablosu güncellenmeli."
 fi
 
 echo

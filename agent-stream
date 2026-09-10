@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["typer>=0.12", "rich>=13.7"]
+# dependencies = ["rich>=13.7"]
 # ///
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  agent-stream — Claude Code oturumlarının komut akışı                     ║
@@ -18,6 +18,7 @@
 # ╚══════════════════════════════════════════════════════════════════════════╝
 from __future__ import annotations
 
+import argparse
 import glob
 import json
 import os
@@ -30,19 +31,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-import typer
 from rich.cells import cell_len, set_cell_size
-from rich.columns import Columns
 from rich.console import Console, Group, RenderableType
-from rich.live import Live
-from rich.panel import Panel
 from rich.segment import Segment, Segments
-from rich.spinner import Spinner
-from rich.syntax import Syntax
-from rich.table import Table
 from rich.text import Text
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 HOME = Path.home()
 DEFAULT_ROOT = Path(os.environ.get("AGENT_STREAM_ROOT", HOME / ".claude" / "projects"))
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agent-stream" / "config.toml"
@@ -51,8 +45,16 @@ EXIT_OK, EXIT_ERR, EXIT_USAGE, EXIT_SIGINT = 0, 1, 2, 130
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 SYSREM = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
-UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+FRESH = 7 * 86400                   # bu yaştan eski proje dizinlerine hiç inilmez
+SAFETY_RESCAN = 5.0                 # yoklamada güvenlik taraması, saniye
+EVENT_RESCAN = 30.0                 # olay arka ucunda: dizin olayı yeni dosyayı zaten söyler
+IDLE_STEPS = (0.25, 0.5, 1.0, 2.0)  # yoklama arka ucunun geri çekilme merdiveni
+WATCH_CAP = 512                     # izlenecek fd üst sınırı
+
+THEME = "monokai"                   # komut bloğunun renk teması; --theme ile değişir
 
 # ─── Şerit renkleri ─────────────────────────────────────────────────────────
 # Renk oturum id'sinden türer: takipçi yeniden başlasa da aynı oturum aynı renkte.
@@ -62,8 +64,6 @@ GLYPH = {
     "Grep": "⌕", "Glob": "⌕", "WebSearch": "⌕", "WebFetch": "⇣", "Task": "⤷", "Agent": "⤷",
     "Skill": "◇", "SlashCommand": "◇", "Artifact": "▤", "TodoWrite": "☑",
 }
-
-THEME = "monokai"                   # komut bloğunun renk teması; --theme ile değişir
 
 out_console = Console()             # veri → stdout
 err_console = Console(stderr=True)  # banner, uyarı, hata → stderr
@@ -75,7 +75,7 @@ def die(msg: str, hint: str = "", code: int = EXIT_ERR) -> None:
     err_console.print(f"[bold red]hata:[/] {msg}", highlight=False)
     if hint:
         err_console.print(f"      {hint}", style="dim", highlight=False)
-    raise typer.Exit(code)
+    raise SystemExit(code)
 
 
 def lane_of(sid: str) -> str:
@@ -88,20 +88,6 @@ def pretty_project(name: str) -> str:
     if name == home:
         return "~"
     return name.removeprefix(f"{home}-Documents-").removeprefix(f"{home}-") or "~"
-
-
-def set_theme(name: str) -> None:
-    """Tema adını doğrular ve modül düzeyinde sabitler."""
-    global THEME
-    if name not in ("ansi_dark", "ansi_light"):
-        try:
-            from pygments.styles import get_style_by_name
-            get_style_by_name(name)
-        except Exception:
-            die(f"bilinmeyen tema: {name}",
-                "ansi_dark · ansi_light · monokai · dracula · nord · github-dark · gruvbox-dark",
-                EXIT_USAGE)
-    THEME = name
 
 
 def pretty_tool(name: str) -> str:
@@ -152,6 +138,179 @@ def human_dur(sec: float) -> str:
     if sec < 60:
         return f"{sec:.1f}s"
     return f"{int(sec // 60)}dk {int(sec % 60)}s"
+
+
+_HL: dict[tuple[str, str], Text] = {}
+
+
+def highlight(code: str) -> Text:
+    """Boyanmış komut metni; panoda kare başına yeniden boyamak 0,55 ms tutuyordu."""
+    key = (code, THEME)
+    hit = _HL.get(key)
+    if hit is None:
+        from rich.syntax import Syntax                     # pygments yalnız renkli yolda
+        hit = Syntax(code, "bash", theme=THEME, background_color="default").highlight(code)
+        hit.rstrip()
+        if len(_HL) > 256:
+            _HL.clear()
+        _HL[key] = hit
+    return hit.copy()
+
+
+# ─── İzleyici ───────────────────────────────────────────────────────────────
+# Ortak arayüz: sync(dirs, files) izlenecek kümeyi kurar, wait(timeout) bir şey
+# olana kadar bloklar ve (uyandı mı, tarama gerekli mi) döner.
+
+class PollWatcher:
+    """Olay arayüzü olmayan sistemler için: uyur, tarama zamanlamasını çağırana bırakır."""
+
+    name = "poll"
+
+    def sync(self, dirs: Iterable[str], files: Iterable[str]) -> None:
+        pass
+
+    def wait(self, timeout: float) -> tuple[bool, bool]:
+        time.sleep(timeout)
+        return False, False
+
+    def close(self) -> None:
+        pass
+
+
+class KqueueWatcher(PollWatcher):
+    """macOS/BSD: dizinlerde oluşturma, dosyalarda ekleme olayları."""
+
+    name = "kqueue"
+
+    def __init__(self) -> None:
+        import select
+        self.select = select
+        self.kq = select.kqueue()
+        self.fds: dict[str, int] = {}
+        self.dirs: set[int] = set()
+
+    def sync(self, dirs, files) -> None:
+        want = list(dirs)[:WATCH_CAP] + list(files)[:WATCH_CAP]
+        wanted = set(want)
+        for path in list(self.fds):
+            if path not in wanted:
+                os.close(self.fds.pop(path))
+        add = []
+        for path in want:
+            if path in self.fds:
+                continue
+            try:
+                fd = os.open(path, os.O_RDONLY)
+            except OSError:
+                continue
+            self.fds[path] = fd
+            if os.path.isdir(path):
+                self.dirs.add(fd)
+            flags = (self.select.KQ_NOTE_WRITE | self.select.KQ_NOTE_EXTEND
+                     | self.select.KQ_NOTE_DELETE | self.select.KQ_NOTE_RENAME)
+            add.append(self.select.kevent(fd, filter=self.select.KQ_FILTER_VNODE,
+                                          flags=self.select.KQ_EV_ADD | self.select.KQ_EV_CLEAR,
+                                          fflags=flags))
+        if add:
+            self.kq.control(add, 0, 0)
+
+    def wait(self, timeout: float) -> tuple[bool, bool]:
+        try:
+            got = self.kq.control(None, 64, timeout)
+        except OSError:
+            return False, True
+        rescan = any(e.ident in self.dirs or e.fflags & (self.select.KQ_NOTE_DELETE
+                                                         | self.select.KQ_NOTE_RENAME) for e in got)
+        return bool(got), rescan
+
+    def close(self) -> None:
+        for fd in self.fds.values():
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self.fds.clear()
+        self.kq.close()
+
+
+class InotifyWatcher(PollWatcher):
+    """Linux: dizin izlemek yeterli — içindeki dosyaların olayları da adıyla gelir."""
+
+    name = "inotify"
+    IN_MODIFY, IN_ATTRIB, IN_CREATE = 0x00000002, 0x00000004, 0x00000100
+    IN_MOVED_TO, IN_DELETE, IN_MOVE_SELF = 0x00000080, 0x00000200, 0x00000800
+    O_NONBLOCK = 0o4000
+
+    def __init__(self) -> None:
+        import ctypes
+        import select
+        import struct
+        self.struct, self.select = struct, select
+        self.libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        self.fd = self.libc.inotify_init1(self.O_NONBLOCK)
+        if self.fd < 0:
+            raise OSError("inotify_init1 başarısız")
+        self.wds: dict[str, int] = {}
+
+    def sync(self, dirs, files) -> None:
+        want = set(list(dirs)[:WATCH_CAP])                 # dosyalar dizinleriyle kapsanıyor
+        for path, wd in list(self.wds.items()):
+            if path not in want:
+                self.libc.inotify_rm_watch(self.fd, wd)
+                self.wds.pop(path, None)
+        mask = (self.IN_MODIFY | self.IN_ATTRIB | self.IN_CREATE
+                | self.IN_MOVED_TO | self.IN_DELETE | self.IN_MOVE_SELF)
+        for path in want:
+            if path in self.wds:
+                continue
+            wd = self.libc.inotify_add_watch(self.fd, os.fsencode(path), mask)
+            if wd >= 0:
+                self.wds[path] = wd
+
+    def _drain(self) -> tuple[bool, bool]:
+        woke = rescan = False
+        while True:
+            try:
+                buf = os.read(self.fd, 8192)
+            except BlockingIOError:
+                break
+            except OSError:
+                return woke, True
+            if not buf:
+                break
+            woke = True
+            i = 0
+            while i + 16 <= len(buf):
+                _wd, mask, _cookie, ln = self.struct.unpack_from("iIII", buf, i)
+                i += 16 + ln
+                if mask & (self.IN_CREATE | self.IN_MOVED_TO | self.IN_DELETE | self.IN_MOVE_SELF):
+                    rescan = True
+        return woke, rescan
+
+    def wait(self, timeout: float) -> tuple[bool, bool]:
+        ready, _, _ = self.select.select([self.fd], [], [], timeout)
+        if not ready:
+            return False, False
+        return self._drain()
+
+    def close(self) -> None:
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+def make_watcher() -> PollWatcher:
+    """AGENT_STREAM_WATCH ile zorlanabilir; kurulamayan arka uç sessizce yoklamaya düşer."""
+    want = os.environ.get("AGENT_STREAM_WATCH", "auto").lower()
+    order = {"auto": ["kqueue", "inotify"], "kqueue": ["kqueue"],
+             "inotify": ["inotify"], "poll": []}.get(want, ["kqueue", "inotify"])
+    for name in order:
+        try:
+            return KqueueWatcher() if name == "kqueue" else InotifyWatcher()
+        except Exception:
+            continue
+    return PollWatcher()
 
 
 # ─── Veri katmanı ───────────────────────────────────────────────────────────
@@ -223,30 +382,70 @@ class Reader:
     """Eşleşen transcript'leri takip eder; ('start'|'end', Cmd) olayları üretir."""
 
     def __init__(self, root: Path, project: str | None, session: str | None,
-                 all_tools: bool, subagents: bool, stale_min: float):
+                 all_tools: bool, subagents: bool, stale_min: float, watch: bool = True):
         self.root, self.project, self.session = root, project, session
         self.all_tools, self.subagents, self.stale_min = all_tools, subagents, stale_min
-        self.rescan = 2.0                              # tam tarama aralığı, saniye
-        self._scanned = 0.0
-        self._paths: list[str] = []
         self.offsets: dict[str, int] = {}
         self.open: dict[str, Cmd] = {}
         self.seen_files: set[str] = set()
+        self.watcher = make_watcher() if watch else PollWatcher()
+        self.rescan = SAFETY_RESCAN if self.watcher.name == "poll" else EVENT_RESCAN
+        self._paths: list[str] = []
+        self._dirs: list[str] = []
+        self._scanned = 0.0
+        self._need_scan = True
+        self._idle = 0
 
     # -- dosya keşfi
+    def _walk(self) -> tuple[list[str], list[str]]:
+        """scandir ile yürür; taze olmayan proje dizinlerine hiç inmez (glob'un üçte biri)."""
+        now = time.time()
+        files: list[str] = []
+        dirs: list[str] = [str(self.root)]
+        try:
+            projects = list(os.scandir(self.root))
+        except OSError:
+            return [], dirs
+        for proj in projects:
+            if not proj.is_dir():
+                continue
+            if self.project and self.project.lower() not in proj.path.lower():
+                continue
+            try:
+                if now - proj.stat().st_mtime > FRESH:
+                    continue
+            except OSError:
+                continue
+            dirs.append(proj.path)
+            stack = [proj.path]
+            while stack:
+                cur = stack.pop()
+                try:
+                    entries = list(os.scandir(cur))
+                except OSError:
+                    continue
+                for e in entries:
+                    if e.is_dir(follow_symlinks=False):
+                        if self.subagents:                 # subagent'lar <oturum>/subagents/ altında
+                            dirs.append(e.path)
+                            stack.append(e.path)
+                    elif e.name.endswith(".jsonl"):
+                        files.append(e.path)
+        return files, dirs
+
+    def scan(self) -> None:
+        self._paths, self._dirs = self._walk()
+        self._scanned = time.time()
+        self._need_scan = False
+        self.watcher.sync(self._dirs, self.seen_files)
+
     def files(self) -> Iterable[tuple[str, os.stat_result]]:
         now = time.time()
-        full = now - self._scanned > self.rescan
-        if full:                                           # 2200+ dosyayı her turda taramak pahalı
-            self._paths = glob.glob(str(self.root / "*" / "*.jsonl"))
-            if self.subagents:                             # subagent'lar <oturum>/subagents/ altında
-                self._paths += glob.glob(str(self.root / "*" / "*" / "subagents" / "**" / "*.jsonl"),
-                                         recursive=True)
-            self._scanned = now
-        # Ara turlarda yalnız takip edilenlere bakılır; yenisi tam taramada yakalanır.
+        full = self._need_scan or now - self._scanned > self.rescan
+        if full:
+            self.scan()
+        # Ara turlarda yalnız takip edilenlere bakılır; yenisi taramada yakalanır.
         for path in (self._paths if full else list(self.seen_files)):
-            if self.project and self.project.lower() not in path.lower():
-                continue
             if self.session and self.session not in path:
                 continue
             try:
@@ -281,6 +480,8 @@ class Reader:
         if isinstance(content, list):
             content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
         text = clean(content if isinstance(content, str) else "")
+        if not text and isinstance(tur, dict):             # ToolSearch/MCP: metin yok, yapı var
+            text = clean(json.dumps(tur, ensure_ascii=False, indent=1)[:2000])
         return ("", text, False) if block.get("is_error") else (text, "", True)
 
     def _events(self, entry: dict) -> Iterable[tuple[str, Cmd]]:
@@ -298,13 +499,14 @@ class Reader:
                 sub = bool(entry.get("isSidechain")) or bool(entry.get("agentId"))
                 if sub and not self.subagents:
                     continue
+                inp = block.get("input") or {}
                 cmd = Cmd(
                     uid=block.get("id", ""), sid=entry.get("sessionId", "????"),
                     cwd=entry.get("cwd", ""), branch=entry.get("gitBranch", ""), sub=sub,
                     agent=str(entry.get("agentId", "")),
                     agent_type=str(entry.get("attributionAgent", "")),
-                    tool=tool, text=self._summary(tool, block.get("input") or {}),
-                    desc=str((block.get("input") or {}).get("description", "")),
+                    tool=tool, text=self._summary(tool, inp),
+                    desc=str(inp.get("description", "")),
                     started=parse_ts(entry.get("timestamp")),
                 )
                 self.open[cmd.uid] = cmd
@@ -320,13 +522,14 @@ class Reader:
     # -- okuma turu
     def poll(self, first: bool = False, backfill: int = 0) -> list[tuple[str, Cmd]]:
         events: list[tuple[str, Cmd]] = []
+        fresh_file = False
         for path, st in self.files():
-            fresh = path not in self.seen_files
-            if fresh:
+            if path not in self.seen_files:
                 self.seen_files.add(path)
+                fresh_file = True
                 # Yeni dosya akışa sonundan katılır; geriye dönük okuma yalnız --backfill ile.
                 self.offsets[path] = 0 if (first and backfill) else st.st_size
-            if st.st_size < self.offsets[path]:      # kırpılmış / döndürülmüş
+            if st.st_size < self.offsets[path]:            # kırpılmış / döndürülmüş
                 self.offsets[path] = 0
             if st.st_size == self.offsets[path]:
                 continue
@@ -348,11 +551,24 @@ class Reader:
                 except json.JSONDecodeError:
                     continue
                 events.extend(self._events(entry))
+        if fresh_file:
+            self.watcher.sync(self._dirs, self.seen_files)
         if first and backfill:
             starts = [e for e in events if e[0] == "start"]
             keep = {c.uid for _, c in starts[-backfill:]}
             events = [(k, c) for k, c in events if c.uid in keep]
+        self._idle = 0 if events else min(self._idle + 1, len(IDLE_STEPS) - 1)
         return events
+
+    def wait(self, base: float = 0.25) -> None:
+        """Olay arka ucunda çekirdek uyandırır; yoklamada boşta kaldıkça aralık büyür."""
+        timeout = self.rescan if self.watcher.name != "poll" else max(base, IDLE_STEPS[self._idle])
+        _, rescan = self.watcher.wait(timeout)
+        if rescan:
+            self._need_scan = True
+
+    def close(self) -> None:
+        self.watcher.close()
 
 
 # ─── Akış görünümü ──────────────────────────────────────────────────────────
@@ -380,15 +596,19 @@ def head_text(cmd: Cmd, desc: bool = True) -> Text:
     return t
 
 
-def cmd_block(cmd: Cmd, color: bool, max_cmd: int = 0) -> RenderableType:
-    """Komut bloğu; heredoc'lu komutlar `max_cmd` satırda kırpılır (0 = sınırsız)."""
-    text = cmd.text
+def cut_cmd(text: str, max_cmd: int) -> str:
+    """Heredoc'lu komutlar `max_cmd` satırda kırpılır (0 = sınırsız)."""
     lines = text.splitlines()
-    if max_cmd and len(lines) > max_cmd:
-        text = "\n".join(lines[:max_cmd]) + f"\n… +{len(lines) - max_cmd} satır komut"
+    if not max_cmd or len(lines) <= max_cmd:
+        return text
+    return "\n".join(lines[:max_cmd]) + f"\n… +{len(lines) - max_cmd} satır komut"
+
+
+def cmd_block(cmd: Cmd, color: bool, max_cmd: int = 0) -> RenderableType:
+    text = cut_cmd(cmd.text, max_cmd)
     if cmd.tool != "Bash" or not color:
         return Text(text, style="bold", overflow="fold")
-    return Syntax(text, "bash", theme=THEME, word_wrap=True, background_color="default")
+    return highlight(text)
 
 
 def status_text(cmd: Cmd, prefix: str = "") -> Text:
@@ -403,7 +623,7 @@ def status_text(cmd: Cmd, prefix: str = "") -> Text:
 
 class StreamView:
     def __init__(self, console: Console, max_lines: int, show_desc: bool, show_output: bool,
-                 max_cmd: int = 10):
+                 max_cmd: int = 6):
         self.c, self.max_lines, self.show_desc, self.show_output = console, max_lines, show_desc, show_output
         self.max_cmd = max_cmd
         self.last_uid = ""
@@ -412,9 +632,8 @@ class StreamView:
         self.c.print()
         self.last_uid = cmd.uid
         lane_print(self.c, cmd.lane, head_text(cmd, self.show_desc))
-        marker = glyph_of(cmd.tool)
         color = self.c.is_terminal and not self.c.no_color
-        lane_print(self.c, cmd.lane, cmd_block(cmd, color, self.max_cmd), marker)
+        lane_print(self.c, cmd.lane, cmd_block(cmd, color, self.max_cmd), glyph_of(cmd.tool))
 
     def end(self, cmd: Cmd) -> None:
         # Paralel komutlarda çıktı başka bir başlığın altına düşebilir: yeniden çapala.
@@ -452,11 +671,12 @@ class Lane:
 
 def lane_parts(lane: Lane, width: int, max_cmd: int) -> tuple[list[RenderableType], list[Text], int]:
     """Şeridin baş bloğu, çıktı kuyruğu ve baş bloğun kapladığı satır sayısı."""
+    from rich.columns import Columns
+    from rich.spinner import Spinner
     color = lane_of(lane.key)
     cmd = lane.running or lane.last
     inner = max(10, width - 4)
     head: list[RenderableType] = []
-    tail: list[Text] = []
     used = 0
 
     if not cmd:
@@ -466,7 +686,7 @@ def lane_parts(lane: Lane, width: int, max_cmd: int) -> tuple[list[RenderableTyp
     rows = [clip(l, inner * 2) for l in (cmd.text.splitlines() or [""])[:max_cmd]]
     extra = len(cmd.text.splitlines()) - max_cmd
     text = "\n".join(rows) + (f"\n… +{extra} satır komut" if extra > 0 else "")
-    head.append(Syntax(text, "bash", theme=THEME, word_wrap=True, background_color="default"))
+    head.append(highlight(text))
     used += sum(-(-cell_len(l) // inner) or 1 for l in text.splitlines())
     if cmd.desc:
         head.append(Text(clip(cmd.desc, inner), style="italic"))
@@ -479,14 +699,15 @@ def lane_parts(lane: Lane, width: int, max_cmd: int) -> tuple[list[RenderableTyp
     return head, tail, used
 
 
-def lane_need(lane: Lane, width: int, max_cmd: int) -> int:
+def lane_need(parts: tuple[list, list, int]) -> int:
     """Şeridin hiç kırpılmadan isteyeceği panel yüksekliği."""
-    _, tail, used = lane_parts(lane, width, max_cmd)
+    _, tail, used = parts
     return used + len(tail) + 3                            # boş satır + iki kenarlık
 
 
-def lane_panel(lane: Lane, height: int, width: int, max_cmd: int = 4) -> Panel:
-    head, tail, used = lane_parts(lane, width, max_cmd)
+def lane_panel(lane: Lane, height: int, width: int, parts: tuple[list, list, int]):
+    from rich.panel import Panel
+    head, tail, used = parts
     room = max(1, height - 3 - used)
     body = Group(*head, Text(""), *tail[-room:])
 
@@ -508,6 +729,9 @@ def lane_panel(lane: Lane, height: int, width: int, max_cmd: int = 4) -> Panel:
 
 def dash_frame(lanes: dict[str, Lane], recent: list[Cmd], started: float,
                total: int, console: Console, cols: int, max_cmd: int = 4) -> RenderableType:
+    from rich.columns import Columns
+    from rich.panel import Panel
+    from rich.table import Table
     active = sorted(lanes.values(), key=lambda l: -l.seen)
     shown, hidden = active[:cols], max(0, len(active) - cols)
 
@@ -524,8 +748,10 @@ def dash_frame(lanes: dict[str, Lane], recent: list[Cmd], started: float,
 
     room = max(9, console.height - 4 - min(len(recent), 5))
     width = max(26, console.width // max(1, len(shown) or 1) - 1)
-    height = min(room, max([9] + [lane_need(l, width, max_cmd) for l in shown])) if shown else room
-    body = Columns([lane_panel(l, height, width, max_cmd) for l in shown], equal=True, expand=True) \
+    parts = [lane_parts(l, width, max_cmd) for l in shown]
+    height = min(room, max([9] + [lane_need(pt) for pt in parts])) if shown else room
+    body = Columns([lane_panel(l, height, width, pt) for l, pt in zip(shown, parts)],
+                   equal=True, expand=True) \
         if shown else Panel(Text("aktif oturum yok — Claude Code'da bir komut çalıştır", style="dim italic"),
                             border_style="dim", height=height)
 
@@ -544,15 +770,7 @@ def dash_frame(lanes: dict[str, Lane], recent: list[Cmd], started: float,
     return Group(header, body, tail)
 
 
-# ─── CLI ────────────────────────────────────────────────────────────────────
-
-app = typer.Typer(
-    add_completion=False,
-    no_args_is_help=False,
-    context_settings={"help_option_names": ["-h", "--help"]},
-    rich_markup_mode="rich",
-)
-
+# ─── Ayar ───────────────────────────────────────────────────────────────────
 
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
@@ -565,18 +783,22 @@ def load_config() -> dict:
         return {}
 
 
-def merged_config(ctx: typer.Context) -> dict:
+def merged_config(section: str) -> dict:
     """`[genel]` + alt komutun kendi bölümü; alt komut bölümü üstte."""
     raw = load_config()
-    return {**raw.get("genel", {}), **raw.get(ctx.command.name or "", {})}
+    return {**raw.get("genel", {}), **raw.get(section, {})}
 
 
-def cfg_value(ctx: typer.Context, cfg: dict, name: str, value):
+def pick(cli, cfg: dict, key: str, fallback, cast=None):
     """Öncelik: bayrak > ortam değişkeni > ayar dosyası > varsayılan (clig.dev)."""
-    src = ctx.get_parameter_source(name)
-    if src is not None and src.name in ("COMMANDLINE", "ENVIRONMENT"):
-        return value
-    return cfg.get(name, value)
+    if cli is not None:
+        return cli
+    env = os.environ.get(f"AGENT_STREAM_{key.upper()}")
+    if env is not None:
+        return cast(env) if cast else env
+    if key in cfg:
+        return cfg[key]
+    return fallback
 
 
 def setup_console(no_color: bool) -> Console:
@@ -585,157 +807,222 @@ def setup_console(no_color: bool) -> Console:
     return Console(highlight=False, soft_wrap=False)
 
 
-def version_cb(value: bool):
-    if value:
-        out_console.print(f"agent-stream {VERSION}")
-        raise typer.Exit()
+def set_theme(name: str) -> None:
+    """Tema adını doğrular ve modül düzeyinde sabitler."""
+    global THEME
+    if name not in ("ansi_dark", "ansi_light"):
+        try:
+            from pygments.styles import get_style_by_name
+            get_style_by_name(name)
+        except Exception:
+            die(f"bilinmeyen tema: {name}",
+                "monokai · dracula · nord · github-dark · gruvbox-dark · ansi_dark", EXIT_USAGE)
+    THEME = name
+    _HL.clear()
 
 
-@app.callback(invoke_without_command=True)
-def stream(
-    ctx: typer.Context,
-    project: str = typer.Option(None, "-p", "--project", envvar="AGENT_STREAM_PROJECT",
-                                help="proje/cwd filtresi (parça eşleşmesi)"),
-    session: str = typer.Option(None, "-s", "--session", help="oturum etiketi öneki, örn. a3d1"),
-    all_tools: bool = typer.Option(True, "--all-tools/--bash-only", "-a/-B",
-                                   help="tüm araçlar (varsayılan) / yalnız Bash"),
-    quiet: bool = typer.Option(False, "-q", "--quiet", help="sadece komutlar, çıktı yok"),
-    max_lines: int = typer.Option(12, "-n", "--max-lines", metavar="N", help="komut başına çıktı satırı sınırı"),
-    max_cmd: int = typer.Option(6, "-m", "--max-cmd", metavar="N", help="komut bloğu satır sınırı (0 = sınırsız)"),
-    backfill: int = typer.Option(0, "-b", "--backfill", metavar="N", help="açılışta son N komutu da göster"),
-    stale: float = typer.Option(30, "--stale", metavar="DK", help="bu süredir sessiz oturumlar atlanır"),
-    interval: float = typer.Option(0.25, "--interval", metavar="SN", help="yoklama aralığı"),
-    subagents: bool = typer.Option(True, "--subagents/--no-subagents", help="subagent şeritlerini göster"),
-    pair: bool = typer.Option(False, "--pair", help="komutu çıktısıyla birlikte, bittiğinde yaz"),
-    desc: bool = typer.Option(True, "--desc/--no-desc", help="komut açıklamasını göster"),
-    as_json: bool = typer.Option(False, "--json", help="satır satır JSON (NDJSON) yaz"),
-    theme: str = typer.Option("monokai", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
-                              help="komut bloğu teması (monokai, dracula, nord, ansi_dark…)"),
-    no_color: bool = typer.Option(False, "--no-color", help="rengi kapat (NO_COLOR da geçerli)"),
-    root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
-    version: bool = typer.Option(False, "-V", "--version", callback=version_cb, is_eager=True,
-                                 help="sürümü yaz ve çık"),
-):
-    """
-    Claude Code oturumlarının çalıştırdığı komutları canlı akıtır.
+# ─── CLI ────────────────────────────────────────────────────────────────────
 
-    [bold]Örnekler[/]
-      agent-stream                       tüm aktif oturumların komut akışı
-      agent-stream -p myapp -n 6         sadece myapp, komut başına 6 satır çıktı
-      agent-stream --pair -q             komutu çıktısıyla birlikte, sade
-      agent-stream dash                  paralel oturumlar için canlı pano
-      agent-stream sessions              aktif oturumları listele
-      agent-stream replay a3d1           geçmiş bir oturumu baştan oynat
-      agent-stream --json | jq -r .command    akışı makineye ver
+EXAMPLES = """\
+Örnekler
+  agent-stream                       tüm aktif oturumların komut akışı
+  agent-stream -p myapp -n 6         sadece myapp, komut başına 6 satır çıktı
+  agent-stream --pair -q             komutu çıktısıyla birlikte, sade
+  agent-stream dash                  paralel oturumlar için canlı pano
+  agent-stream sessions              aktif oturumları listele
+  agent-stream replay a3d1           geçmiş bir oturumu baştan oynat
+  agent-stream --json | jq -r .command    akışı makineye ver
 
-    Ayar dosyası: ~/.config/agent-stream/config.toml  ·  ortam: AGENT_STREAM_PROJECT, AGENT_STREAM_ROOT
-    """
-    if ctx.invoked_subcommand is not None:
-        return
-    cfg = merged_config(ctx)
-    max_lines = cfg_value(ctx, cfg, "max_lines", max_lines)
-    max_cmd = cfg_value(ctx, cfg, "max_cmd", max_cmd)
-    stale = cfg_value(ctx, cfg, "stale", stale)
-    project = cfg_value(ctx, cfg, "project", project)
-    set_theme(cfg_value(ctx, cfg, "theme", theme))
+Ayar dosyası: ~/.config/agent-stream/config.toml  ·  ortam: AGENT_STREAM_PROJECT,
+AGENT_STREAM_ROOT, AGENT_STREAM_THEME, AGENT_STREAM_WATCH (auto|kqueue|inotify|poll)
+"""
 
+
+def add_common(ap: argparse.ArgumentParser, dash: bool = False) -> None:
+    ap.add_argument("-p", "--project", metavar="AD", help="proje/cwd filtresi (parça eşleşmesi)")
+    ap.add_argument("-s", "--session", metavar="ETİKET", help="oturum etiketi öneki, örn. a3d1")
+    ap.add_argument("-a", "--all-tools", dest="all_tools", action="store_true", default=None,
+                    help="tüm araçlar (varsayılan)")
+    ap.add_argument("-B", "--bash-only", dest="all_tools", action="store_false",
+                    help="yalnız Bash komutları")
+    ap.add_argument("-m", "--max-cmd", type=int, metavar="N",
+                    help="komut bloğu satır sınırı (0 = sınırsız)")
+    ap.add_argument("--stale", type=float, metavar="DK", help="bu süredir sessiz oturumlar atlanır")
+    ap.add_argument("--interval", type=float, metavar="SN", help="yoklama arka ucunun taban aralığı")
+    ap.add_argument("--theme", metavar="AD", help="komut bloğu teması (monokai, nord, ansi_dark…)")
+    ap.add_argument("--root", metavar="DİZİN", help="transcript kökü")
+    if not dash:
+        ap.add_argument("--subagents", dest="subagents", action="store_true", default=None,
+                        help="subagent şeritlerini göster (varsayılan)")
+        ap.add_argument("--no-subagents", dest="subagents", action="store_false",
+                        help="subagent'ları gizle")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog="agent-stream", add_help=True,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Claude Code oturumlarının çalıştırdığı komutları canlı akıtır.\n\n" + EXAMPLES,
+    )
+    ap.add_argument("-V", "--version", action="version", version=f"agent-stream {VERSION}")
+    add_common(ap)
+    ap.add_argument("-q", "--quiet", action="store_true", help="sadece komutlar, çıktı yok")
+    ap.add_argument("-n", "--max-lines", type=int, metavar="N", help="komut başına çıktı satırı sınırı")
+    ap.add_argument("-b", "--backfill", type=int, metavar="N", help="açılışta son N komutu da göster")
+    ap.add_argument("--pair", action="store_true", help="komutu çıktısıyla birlikte, bittiğinde yaz")
+    ap.add_argument("--no-desc", dest="desc", action="store_false", help="komut açıklamasını gizle")
+    ap.add_argument("--json", dest="as_json", action="store_true", help="satır satır JSON (NDJSON) yaz")
+    ap.add_argument("--no-color", action="store_true", help="rengi kapat (NO_COLOR da geçerli)")
+
+    subs = ap.add_subparsers(dest="cmd")
+
+    p_stream = subs.add_parser("stream", formatter_class=argparse.RawDescriptionHelpFormatter,
+                               help="komutları ve çıktılarını akış halinde yaz (varsayılan görünüm)")
+    add_common(p_stream)
+    p_stream.add_argument("-q", "--quiet", action="store_true")
+    p_stream.add_argument("-n", "--max-lines", type=int, metavar="N")
+    p_stream.add_argument("-b", "--backfill", type=int, metavar="N")
+    p_stream.add_argument("--pair", action="store_true")
+    p_stream.add_argument("--no-desc", dest="desc", action="store_false")
+    p_stream.add_argument("--json", dest="as_json", action="store_true")
+    p_stream.add_argument("--no-color", action="store_true")
+
+    p_dash = subs.add_parser("dash", help="paralel oturumları yan yana şeritlerde gösteren canlı pano")
+    add_common(p_dash, dash=True)
+    p_dash.add_argument("-c", "--columns", dest="lanes", type=int, metavar="N",
+                        help="yan yana gösterilecek oturum sayısı")
+
+    p_ses = subs.add_parser("sessions", help="aktif oturumları etiketleriyle listele")
+    p_ses.add_argument("--stale", type=float, metavar="DK", default=60)
+    p_ses.add_argument("--all", dest="all_", action="store_true", help="süre filtresi olmadan hepsi")
+    p_ses.add_argument("--json", dest="as_json", action="store_true")
+    p_ses.add_argument("--root", metavar="DİZİN")
+
+    p_rep = subs.add_parser("replay", help="geçmiş bir oturumun komutlarını baştan yaz")
+    p_rep.add_argument("tag", help="oturum etiketi ya da tam id")
+    p_rep.add_argument("-n", "--max-lines", type=int, metavar="N")
+    p_rep.add_argument("-m", "--max-cmd", type=int, metavar="N")
+    p_rep.add_argument("-a", "--all-tools", dest="all_tools", action="store_true", default=None)
+    p_rep.add_argument("-B", "--bash-only", dest="all_tools", action="store_false")
+    p_rep.add_argument("--theme", metavar="AD")
+    p_rep.add_argument("--no-color", action="store_true")
+    p_rep.add_argument("--root", metavar="DİZİN")
+    return ap
+
+
+def root_of(args) -> Path:
+    return Path(getattr(args, "root", None) or DEFAULT_ROOT).expanduser()
+
+
+def cmd_stream(args) -> None:
+    cfg = merged_config("stream")
+    max_lines = int(pick(args.max_lines, cfg, "max_lines", 12, int))
+    max_cmd = int(pick(args.max_cmd, cfg, "max_cmd", 6, int))
+    stale = float(pick(args.stale, cfg, "stale", 30, float))
+    base = float(pick(args.interval, cfg, "interval", 0.25, float))
+    project = pick(args.project, cfg, "project", None)
+    all_tools = pick(args.all_tools, cfg, "all_tools", True)
+    subagents = args.subagents if args.subagents is not None else cfg.get("subagents", True)
+    set_theme(str(pick(args.theme, cfg, "theme", "monokai")))
+    root = root_of(args)
     if not root.is_dir():
         die(f"{root} yok", "Claude Code bu makinede hiç çalışmamış olabilir; --root ile başka bir kök verebilirsin.")
 
-    console = setup_console(no_color)
-    reader = Reader(root, project, session, all_tools, subagents, stale)
-    view = StreamView(console, max_lines, desc, not quiet, max_cmd)
+    console = setup_console(args.no_color)
+    reader = Reader(root, project, args.session, all_tools, subagents, stale)
+    view = StreamView(console, max_lines, args.desc, not args.quiet, max_cmd)
+    backfill = int(pick(args.backfill, cfg, "backfill", 0, int))
 
-    if not as_json:
-        scope = f"{project or 'tüm projeler'}"
-        err_console.print(f"[dim]agent-stream {VERSION} · {scope} · çıkış Ctrl+C[/]", highlight=False)
+    if not args.as_json:
+        err_console.print(f"[dim]agent-stream {VERSION} · {project or 'tüm projeler'} · "
+                          f"{reader.watcher.name} · çıkış Ctrl+C[/]", highlight=False)
+    try:
+        events = reader.poll(first=True, backfill=backfill)
+        while True:
+            for kind, cmd in events:
+                if args.as_json:
+                    if kind == "end":
+                        print(json.dumps(cmd.as_json(), ensure_ascii=False), flush=True)
+                elif kind == "start":
+                    if not args.pair:
+                        view.start(cmd)
+                else:
+                    if args.pair:
+                        view.start(cmd)
+                    view.end(cmd)
+            reader.wait(base)
+            events = reader.poll()
+    finally:
+        reader.close()
 
-    events = reader.poll(first=True, backfill=backfill)
-    while True:
-        for kind, cmd in events:
-            if as_json:
-                if kind == "end":
-                    print(json.dumps(cmd.as_json(), ensure_ascii=False), flush=True)
-            elif kind == "start":
-                if not pair:
-                    view.start(cmd)
-            else:
-                if pair:
-                    view.start(cmd)
-                view.end(cmd)
-        time.sleep(interval)
-        events = reader.poll()
 
-
-@app.command()
-def dash(
-    ctx: typer.Context,
-    project: str = typer.Option(None, "-p", "--project", envvar="AGENT_STREAM_PROJECT", help="proje/cwd filtresi"),
-    session: str = typer.Option(None, "-s", "--session", help="oturum etiketi öneki"),
-    all_tools: bool = typer.Option(True, "--all-tools/--bash-only", "-a/-B",
-                                   help="tüm araçlar (varsayılan) / yalnız Bash"),
-    theme: str = typer.Option("monokai", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
-                              help="komut bloğu teması (monokai, dracula, nord, ansi_dark…)"),
-    lanes: int = typer.Option(4, "-c", "--columns", metavar="N", help="yan yana gösterilecek oturum sayısı"),
-    max_cmd: int = typer.Option(4, "-m", "--max-cmd", metavar="N", help="şeritteki komut satırı sınırı"),
-    stale: float = typer.Option(15, "--stale", metavar="DK", help="bu süredir sessiz oturumlar atlanır"),
-    interval: float = typer.Option(0.2, "--interval", metavar="SN", help="yoklama aralığı"),
-    root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
-):
-    """Paralel oturumları yan yana şeritlerde gösteren canlı pano."""
-    cfg = merged_config(ctx)
-    project = cfg_value(ctx, cfg, "project", project)
-    stale = cfg_value(ctx, cfg, "stale", stale)
-    max_cmd = cfg_value(ctx, cfg, "max_cmd", max_cmd)
-    set_theme(cfg_value(ctx, cfg, "theme", theme))
+def cmd_dash(args) -> None:
+    from rich.live import Live
+    cfg = merged_config("dash")
+    stale = float(pick(args.stale, cfg, "stale", 15, float))
+    max_cmd = int(pick(args.max_cmd, cfg, "max_cmd", 4, int))
+    cols = int(pick(args.lanes, cfg, "columns", 4, int))
+    base = float(pick(args.interval, cfg, "interval", 0.25, float))
+    project = pick(args.project, cfg, "project", None)
+    all_tools = pick(args.all_tools, cfg, "all_tools", True)
+    set_theme(str(pick(args.theme, cfg, "theme", "monokai")))
+    root = root_of(args)
     if not root.is_dir():
         die(f"{root} yok", "--root ile transcript kökünü verebilirsin.")
     console = setup_console(False)
     if not console.is_terminal:
         die("pano bir terminal gerektirir", "boru hattında `agent-stream --json` kullan.", EXIT_USAGE)
 
-    reader = Reader(root, project, session, all_tools, True, stale)
-    lanes_by_sid: dict[str, Lane] = {}
+    reader = Reader(root, project, args.session, all_tools, True, stale)
+    lanes: dict[str, Lane] = {}
     recent: list[Cmd] = []
-    started, total = time.time(), 0
+    started, total, drawn = time.time(), 0, 0.0
 
     reader.poll(first=True)
-    with Live(console=console, screen=True, refresh_per_second=8, transient=True) as live:
-        while True:
-            for kind, cmd in reader.poll():
-                lane = lanes_by_sid.setdefault(cmd.key, Lane(cmd.key))
-                lane.tag, lane.label = cmd.tag, cmd.label
-                lane.cwd, lane.branch, lane.seen = cmd.cwd, cmd.branch, time.time()
-                if kind == "start":
-                    lane.running, total = cmd, total + 1
-                else:
-                    lane.running, lane.last, lane.count = None, cmd, lane.count + 1
-                    recent.append(cmd)
-                    recent[:] = recent[-20:]
-            cutoff = time.time() - stale * 60
-            for key in [k for k, l in lanes_by_sid.items() if l.seen < cutoff]:
-                del lanes_by_sid[key]
-            live.update(dash_frame(lanes_by_sid, recent, started, total, console, lanes, max_cmd))
-            time.sleep(interval)
+    try:
+        # Kare yalnız durum değişince üretilir; koşan komut varken spinner için 4 fps.
+        with Live(console=console, screen=True, auto_refresh=False, transient=True) as live:
+            while True:
+                changed = False
+                for kind, cmd in reader.poll():
+                    lane = lanes.setdefault(cmd.key, Lane(cmd.key))
+                    lane.tag, lane.label = cmd.tag, cmd.label
+                    lane.cwd, lane.branch, lane.seen = cmd.cwd, cmd.branch, time.time()
+                    if kind == "start":
+                        lane.running, total, changed = cmd, total + 1, True
+                    else:
+                        lane.running, lane.last, lane.count = None, cmd, lane.count + 1
+                        recent.append(cmd)
+                        recent[:] = recent[-20:]
+                        changed = True
+                cutoff = time.time() - stale * 60
+                for key in [k for k, l in lanes.items() if l.seen < cutoff]:
+                    del lanes[key]
+                    changed = True
+
+                running = any(l.running for l in lanes.values())
+                now = time.time()
+                if changed or (running and now - drawn >= 0.25) or now - drawn >= 5.0:
+                    live.update(dash_frame(lanes, recent, started, total, console, cols, max_cmd),
+                                refresh=True)
+                    drawn = now
+                reader.wait(base if running else 1.0)
+    finally:
+        reader.close()
 
 
-@app.command()
-def sessions(
-    ctx: typer.Context,
-    stale: float = typer.Option(60, "--stale", metavar="DK", help="bu süredir sessiz oturumlar gizlenir"),
-    all_: bool = typer.Option(False, "--all", help="süre filtresi olmadan hepsini listele"),
-    as_json: bool = typer.Option(False, "--json", help="JSON yaz"),
-    root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
-):
-    """Aktif (ve istenirse tüm) oturumları etiketleriyle listele."""
-    stale = cfg_value(ctx, merged_config(ctx), "stale", stale)
+def cmd_sessions(args) -> None:
+    from rich.table import Table
+    cfg = merged_config("sessions")
+    stale = float(pick(None if args.stale == 60 else args.stale, cfg, "stale", 60, float))
+    root = root_of(args)
     if not root.is_dir():
         die(f"{root} yok")
     rows = []
     for path in glob.glob(str(root / "*" / "*.jsonl")):
         st = os.stat(path)
         age = (time.time() - st.st_mtime) / 60
-        if not all_ and age > stale:
+        if not args.all_ and age > stale:
             continue
         rows.append({
             "session": os.path.basename(path)[:-6],
@@ -746,7 +1033,7 @@ def sessions(
         })
     rows.sort(key=lambda r: r["idle_min"])
 
-    if as_json:
+    if args.as_json:
         print(json.dumps(rows, ensure_ascii=False, indent=2), flush=True)
         return
     if not rows:
@@ -766,35 +1053,29 @@ def sessions(
     out_console.print(table)
 
 
-@app.command()
-def replay(
-    ctx: typer.Context,
-    tag: str = typer.Argument(..., help="oturum etiketi ya da tam id (agent-stream sessions ile bak)"),
-    max_lines: int = typer.Option(6, "-n", "--max-lines", metavar="N", help="çıktı satır sınırı"),
-    max_cmd: int = typer.Option(10, "-m", "--max-cmd", metavar="N", help="komut bloğu satır sınırı (0 = sınırsız)"),
-    all_tools: bool = typer.Option(True, "--all-tools/--bash-only", "-a/-B",
-                                   help="tüm araçlar (varsayılan) / yalnız Bash"),
-    theme: str = typer.Option("monokai", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
-                              help="komut bloğu teması (monokai, dracula, nord, ansi_dark…)"),
-    no_color: bool = typer.Option(False, "--no-color", help="rengi kapat"),
-    root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
-):
-    """Geçmiş bir oturumun tüm komutlarını baştan yaz (takip etmez)."""
-    cfg = merged_config(ctx)
-    max_lines = cfg_value(ctx, cfg, "max_lines", max_lines)
-    max_cmd = cfg_value(ctx, cfg, "max_cmd", max_cmd)
-    set_theme(cfg_value(ctx, cfg, "theme", theme))
-    matches = [p for p in glob.glob(str(root / "*" / "*.jsonl")) if os.path.basename(p).startswith(tag)]
+def cmd_replay(args) -> None:
+    cfg = merged_config("replay")
+    max_lines = int(pick(args.max_lines, cfg, "max_lines", 6, int))
+    max_cmd = int(pick(args.max_cmd, cfg, "max_cmd", 10, int))
+    all_tools = pick(args.all_tools, cfg, "all_tools", True)
+    set_theme(str(pick(args.theme, cfg, "theme", "monokai")))
+    root = root_of(args)
+    matches = [p for p in glob.glob(str(root / "**" / "*.jsonl"), recursive=True)
+               if os.path.basename(p).startswith(args.tag)]
     if not matches:
-        die(f"'{tag}' ile başlayan oturum yok", "agent-stream sessions --all ile etiketlere bakabilirsin.")
+        die(f"'{args.tag}' ile başlayan oturum yok",
+            "agent-stream sessions --all ile etiketlere bakabilirsin.")
     if len(matches) > 1:
-        die(f"'{tag}' birden çok oturumla eşleşti", "daha uzun bir önek ver: " +
-            ", ".join(os.path.basename(m)[:8] for m in matches[:5]))
+        die(f"'{args.tag}' birden çok oturumla eşleşti",
+            "daha uzun bir önek ver: " + ", ".join(os.path.basename(m)[:8] for m in matches[:5]))
 
-    console = setup_console(no_color)
-    reader = Reader(root, None, None, all_tools, True, stale_min=float("inf"))
+    console = setup_console(args.no_color)
+    reader = Reader(root, None, None, all_tools, True, stale_min=float("inf"), watch=False)
     reader.seen_files.add(matches[0])
     reader.offsets[matches[0]] = 0
+    reader._paths = [matches[0]]
+    reader._scanned = time.time()
+    reader._need_scan = False
     view = StreamView(console, max_lines, True, True, max_cmd)
     for kind, cmd in reader.poll():
         if kind == "end":          # oynatma canlı değil: komut çıktısıyla bitişik kalsın
@@ -802,12 +1083,15 @@ def replay(
             view.end(cmd)
 
 
-app.command("stream", help="Komutları ve çıktılarını akış halinde yaz (varsayılan görünüm).")(stream)
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
+    {"dash": cmd_dash, "sessions": cmd_sessions, "replay": cmd_replay}.get(
+        getattr(args, "cmd", None) or "stream", cmd_stream)(args)
 
 
 if __name__ == "__main__":
     try:
-        app()
+        main()
     except KeyboardInterrupt:
         err_console.print("\n[dim]durduruldu[/]")
         sys.exit(EXIT_SIGINT)

@@ -32,7 +32,7 @@ Araç işaretleri: `$` Bash · `▸` Read · `✎` Edit/Write · `⌕` Grep/Glob
 astream -p myapp -n 6          # sadece myapp projesi, komut başına 6 satır çıktı
 astream -s a3d1                # tek oturum
 astream -q                     # sadece komutlar, çıktı yok
-astream -m 4                   # uzun heredoc komutlarını 4 satırda kır (0 = sınırsız)
+astream -m 4                   # uzun heredoc komutlarını 4 satırda kır (varsayılan 6, 0 = sınırsız)
 astream -B                     # yalnız Bash (varsayılan: Read, Edit, Grep, Task, MCP dahil hepsi)
 astream --theme ansi_dark      # komut bloğu teması (varsayılan monokai): nord, dracula, ansi_dark…
 astream -b 20                  # açılışta son 20 komutu da göster
@@ -69,6 +69,27 @@ profilde (yeşil üstü siyah gibi) sözdizimi boyaması bilgi taşımaz, o yüz
 
 Ayar dosyası `[genel]` bölümünün yanında alt komut bölümü de kabul eder (`[stream]`, `[dash]`,
 `[sessions]`, `[replay]`); alt komut bölümü `[genel]`i ezer, bayrak ve ortam değişkeni ikisini de.
+
+## Kaynak tüketimi
+
+Araç olay tabanlı çalışır: dosyalar yazıldığında çekirdek uyandırır, kimse yoklamaz.
+
+| | boşta | komut akarken |
+| --- | --- | --- |
+| akış · kqueue (macOS) | %0,04 CPU | + komut başına 1,5 ms |
+| akış · inotify (Linux) | aynı sınıf | + komut başına 1,5 ms |
+| akış · yoklama fallback | %0,22 CPU | + komut başına 1,5 ms |
+| pano | %0,44 CPU | %1,9 CPU (4 fps) |
+
+Karşılaştırma için 1.0.0 sürümü boşta %1,45, pano açıkken %8,8 harcıyordu. Bellek 11-31 MB,
+açılış ~120 ms. Ölçümü kendin tekrarlamak için:
+
+```bash
+./bench/bench.py
+```
+
+Arka uç `AGENT_STREAM_WATCH` ile zorlanabilir: `auto` (varsayılan) · `kqueue` · `inotify` · `poll`.
+Kurulamayan arka uç sessizce yoklamaya düşer, davranış değişmez.
 
 ## Sınırlar
 
