@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Iterable
 
 import typer
-from rich.align import Align
 from rich.columns import Columns
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
@@ -413,8 +412,8 @@ def lane_panel(lane: Lane, height: int, width: int) -> Panel:
         head.append(Text("bekliyor…", style="dim italic"))
         used += 1
 
-    room = max(1, height - 2 - used)
-    body = Group(*head, Align(Group(*tail[-room:]), vertical="bottom", height=room))
+    room = max(1, height - 3 - used)
+    body = Group(*head, Text(""), *tail[-room:])
 
     title = Text(f"▌{lane.sid[:4]} ", style=f"bold {color}")
     title.append(short_path(lane.cwd), style="bold")

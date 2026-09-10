@@ -82,7 +82,7 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `Reader.files` | Stale filtresi yalnız **yeni** dosyaya | Takip edilen bir oturum sessizleşince akıştan düşmemeli |
 | `clean` | `SYSREM` deseni | `tool_result` içine eklenen `<system-reminder>` blokları kullanıcının komut çıktısı değil |
 | `parse_ts` | `.replace("Z", "+00:00").astimezone()` | Transcript UTC yazar; ekranda yerel saat okunur |
-| `lane_panel` | `Align(vertical="bottom")` | Çıktı kuyruğu terminal gibi aşağıya yapışsın, panel boyu sabit kalsın |
+| `lane_panel` | Çıktı kuyruğu komutun hemen altında | Dibe yapıştırılınca (ilk tasarım) uzun terminalde komut ile çıktısı arasında ekran boyu boşluk kalıyordu; kuyruk yine son satırlar, ama başlığa bitişik |
 | `lane_panel` | `Panel(..., width=width)` | Genişlik verilmezse `Columns` panelleri yan yana değil alt alta yığar |
 | `lane_panel` | Spinner gövdede, özet altyazıda | `Panel(subtitle=…)` yalnız metin kabul eder; `Columns` altyazıya konursa `AttributeError` |
 | `stream` | Bayraklar root callback'te | `agent-stream -n 3` alt komut yazmadan çalışsın; `stream` adı yine de açık dursun |
