@@ -4,3 +4,4 @@
 project = "myapp"   # varsayılan proje filtresi
 max_lines = 8       # komut başına çıktı satırı
 stale = 45          # kaç dakikadır sessiz oturumlar atlanır
+theme = "monokai"   # komut bloğu teması

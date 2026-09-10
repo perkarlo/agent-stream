@@ -83,6 +83,7 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `Reader.files` | Stale filtresi yalnız **yeni** dosyaya | Takip edilen bir oturum sessizleşince akıştan düşmemeli |
 | `cmd_block` / `lane_panel` | `theme=THEME`, varsayılan `ansi_dark` | ANSI teması rengi terminalin paletinden alır: aynı çıktı bir terminalde yeşil, başkasında mavi görünür. Sabit tema isteyen `--theme` ile pinler; varsayılanı değiştirmek herkesin terminal profilini ezmek olurdu |
 | `pretty_tool` | `UUID` sunucu adı → `mcp:` | Konnektör MCP sunucuları 36 karakterlik uuid adı taşıyor; ham hâli komut satırının yarısını yiyordu |
+| `_result` | `"stdout" in tur` koşulu | `toolUseResult` yalnız Bash'te `stdout`/`stderr` taşıyor; Read/Edit/MCP sonuçları `tool_result` bloğunda. Koşulsuz `tur.get("stdout")` bütün Bash dışı araçlara "çıktı yok" dedirtiyordu (10.09, tüm araçlar varsayılan olduktan sonra görüldü) |
 | `clean` | `SYSREM` deseni | `tool_result` içine eklenen `<system-reminder>` blokları kullanıcının komut çıktısı değil |
 | `parse_ts` | `.replace("Z", "+00:00").astimezone()` | Transcript UTC yazar; ekranda yerel saat okunur |
 | `lane_panel` | Çıktı kuyruğu komutun hemen altında | Dibe yapıştırılınca (ilk tasarım) uzun terminalde komut ile çıktısı arasında ekran boyu boşluk kalıyordu; kuyruk yine son satırlar, ama başlığa bitişik |

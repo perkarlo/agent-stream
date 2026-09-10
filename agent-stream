@@ -50,6 +50,7 @@ EXIT_OK, EXIT_ERR, EXIT_USAGE, EXIT_SIGINT = 0, 1, 2, 130
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 SYSREM = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 # ─── Şerit renkleri ─────────────────────────────────────────────────────────
@@ -103,11 +104,12 @@ def set_theme(name: str) -> None:
 
 
 def pretty_tool(name: str) -> str:
-    """`mcp__trello__trello_list_cards` → `trello:list_cards`."""
+    """`mcp__trello__trello_list_cards` → `trello:list_cards`; uuid sunucular `mcp:` olur."""
     if not name.startswith("mcp__"):
         return name
     parts = name.split("__")
     server, tool = (parts[1], parts[-1]) if len(parts) > 2 else (parts[-1], parts[-1])
+    server = "mcp" if UUID.fullmatch(server) else server
     return f"{server}:{tool.removeprefix(server + '_')}"
 
 
@@ -244,7 +246,8 @@ class Reader:
 
     def _result(self, entry: dict, block: dict) -> tuple[str, str, bool]:
         tur = entry.get("toolUseResult")
-        if isinstance(tur, dict):
+        # stdout/stderr yalnız Bash'te var; diğer araçlarda çıktı tool_result bloğunda.
+        if isinstance(tur, dict) and ("stdout" in tur or "stderr" in tur):
             o, e = clean(tur.get("stdout", "")), clean(tur.get("stderr", ""))
             if tur.get("interrupted"):
                 return o, (e + "\n[kesildi]").strip(), False
