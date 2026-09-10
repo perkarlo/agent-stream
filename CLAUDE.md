@@ -38,7 +38,8 @@ Bunlar bilinçli kararlar. Değiştirmeden önce burada neden yazdığına bak.
 | 7 | Süre transcript damgasından | Duvar saatinden değil; `replay` geçmişi doğru göstermek zorunda |
 | 8 | Çıkış kodu sözleşmesi | `0` başarı · `1` hata · `2` kullanım hatası · `130` Ctrl+C. `EXIT_*` sabitleri tek kaynak |
 | 9 | Kişisel yol sabit yazılmaz | Proje adı `HOME`'dan türetilir (`pretty_project`). Başka makinede de doğru okunmalı |
-| 10 | Ayar önceliği ölçülür, tahmin edilmez | `ctx.get_parameter_source` ile: bayrak > ortam > dosya > varsayılan (clig.dev) |
+| 10 | Varsayılan **tüm araçlar** | Oturumun ne yaptığı yalnız Bash'ten okunmuyor; Read/Edit/MCP çağrıları da akışın parçası (kullanıcı kararı, 10.09). `-B/--bash-only` daraltır, `TodoWrite` her hâlükârda elenir |
+| 11 | Ayar önceliği ölçülür, tahmin edilmez | `ctx.get_parameter_source` ile: bayrak > ortam > dosya > varsayılan (clig.dev) |
 
 ## Python Standartları
 
@@ -80,6 +81,8 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `Reader.poll` | `'"tool_use"' not in line` ön elemesi | 10 MB'lık transcript'te satır başına `json.loads` pahalı; ilgisiz satırlar string testiyle elenir |
 | `Reader.poll` | `lines[-backfill * 6:]` + keep-set | Bir komut birkaç JSONL satırı eder; kaba pencere alınıp sonunda olay sayısına indirilir |
 | `Reader.files` | Stale filtresi yalnız **yeni** dosyaya | Takip edilen bir oturum sessizleşince akıştan düşmemeli |
+| `cmd_block` / `lane_panel` | `theme=THEME`, varsayılan `ansi_dark` | ANSI teması rengi terminalin paletinden alır: aynı çıktı bir terminalde yeşil, başkasında mavi görünür. Sabit tema isteyen `--theme` ile pinler; varsayılanı değiştirmek herkesin terminal profilini ezmek olurdu |
+| `pretty_tool` | `UUID` sunucu adı → `mcp:` | Konnektör MCP sunucuları 36 karakterlik uuid adı taşıyor; ham hâli komut satırının yarısını yiyordu |
 | `clean` | `SYSREM` deseni | `tool_result` içine eklenen `<system-reminder>` blokları kullanıcının komut çıktısı değil |
 | `parse_ts` | `.replace("Z", "+00:00").astimezone()` | Transcript UTC yazar; ekranda yerel saat okunur |
 | `lane_panel` | Çıktı kuyruğu komutun hemen altında | Dibe yapıştırılınca (ilk tasarım) uzun terminalde komut ile çıktısı arasında ekran boyu boşluk kalıyordu; kuyruk yine son satırlar, ama başlığa bitişik |
@@ -91,7 +94,7 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 ## Bilinen Sınırlar
 
 - Cloud oturumları görünmez: yerel transcript yazmıyorlar.
-- MCP araç çağrıları `Bash` değil; `-a/--all-tools` ile gelirler.
+- Varsayılan tüm araçlar; `-B/--bash-only` yalnız kabuk komutlarını bırakır.
 - Yoklama 250 ms (`--interval`); göz kararı anlık ama tam senkron değil.
 - Transcript'ler varsayılan 30 gün tutulur; `replay` o pencereyle sınırlı.
 

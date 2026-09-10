@@ -58,7 +58,10 @@ LANES = ["cyan", "magenta", "green", "yellow", "blue", "bright_magenta", "bright
 GLYPH = {
     "Bash": "$", "Read": "▸", "Edit": "✎", "Write": "✎", "NotebookEdit": "✎",
     "Grep": "⌕", "Glob": "⌕", "WebSearch": "⌕", "WebFetch": "⇣", "Task": "⤷", "Agent": "⤷",
+    "Skill": "◇", "SlashCommand": "◇", "Artifact": "▤", "TodoWrite": "☑",
 }
+
+THEME = "ansi_dark"                 # komut bloğunun renk teması; --theme ile değişir
 
 out_console = Console()             # veri → stdout
 err_console = Console(stderr=True)  # banner, uyarı, hata → stderr
@@ -83,6 +86,33 @@ def pretty_project(name: str) -> str:
     if name == home:
         return "~"
     return name.removeprefix(f"{home}-Documents-").removeprefix(f"{home}-") or "~"
+
+
+def set_theme(name: str) -> None:
+    """Tema adını doğrular ve modül düzeyinde sabitler."""
+    global THEME
+    if name not in ("ansi_dark", "ansi_light"):
+        try:
+            from pygments.styles import get_style_by_name
+            get_style_by_name(name)
+        except Exception:
+            die(f"bilinmeyen tema: {name}",
+                "ansi_dark · ansi_light · monokai · dracula · nord · github-dark · gruvbox-dark",
+                EXIT_USAGE)
+    THEME = name
+
+
+def pretty_tool(name: str) -> str:
+    """`mcp__trello__trello_list_cards` → `trello:list_cards`."""
+    if not name.startswith("mcp__"):
+        return name
+    parts = name.split("__")
+    server, tool = (parts[1], parts[-1]) if len(parts) > 2 else (parts[-1], parts[-1])
+    return f"{server}:{tool.removeprefix(server + '_')}"
+
+
+def glyph_of(tool: str) -> str:
+    return "⚙" if tool.startswith("mcp__") else GLYPH.get(tool, "·")
 
 
 def short_path(p: str) -> str:
@@ -207,9 +237,10 @@ class Reader:
     def _summary(self, tool: str, inp: dict) -> str:
         if tool == "Bash":
             return str(inp.get("command", ""))
-        arg = inp.get("file_path") or inp.get("pattern") or inp.get("url") or inp.get("query") \
-            or inp.get("prompt") or json.dumps(inp, ensure_ascii=False)
-        return f"{tool} {clip(str(arg).replace(chr(10), ' '), 160)}"
+        arg = inp.get("file_path") or inp.get("pattern") or inp.get("url") or inp.get("skill") \
+            or inp.get("query") or inp.get("command") or inp.get("prompt") \
+            or json.dumps(inp, ensure_ascii=False)
+        return f"{pretty_tool(tool)} {clip(str(arg).replace(chr(10), ' '), 160)}"
 
     def _result(self, entry: dict, block: dict) -> tuple[str, str, bool]:
         tur = entry.get("toolUseResult")
@@ -325,7 +356,7 @@ def cmd_block(cmd: Cmd, color: bool, max_cmd: int = 0) -> RenderableType:
         text = "\n".join(lines[:max_cmd]) + f"\n… +{len(lines) - max_cmd} satır komut"
     if cmd.tool != "Bash" or not color:
         return Text(text, style="bold", overflow="fold")
-    return Syntax(text, "bash", theme="ansi_dark", word_wrap=True, background_color="default")
+    return Syntax(text, "bash", theme=THEME, word_wrap=True, background_color="default")
 
 
 def status_text(cmd: Cmd, prefix: str = "") -> Text:
@@ -349,7 +380,7 @@ class StreamView:
         self.c.print()
         self.last_uid = cmd.uid
         lane_print(self.c, cmd.lane, head_text(cmd))
-        marker = "$" if cmd.tool == "Bash" else GLYPH.get(cmd.tool, "·")
+        marker = glyph_of(cmd.tool)
         color = self.c.is_terminal and not self.c.no_color
         lane_print(self.c, cmd.lane, cmd_block(cmd, color, self.max_cmd), marker)
         if self.show_desc and cmd.desc:
@@ -398,7 +429,7 @@ def lane_panel(lane: Lane, height: int, width: int) -> Panel:
 
     if cmd:
         text = clip(cmd.text.replace("\n", " ⏎ "), inner * 3)
-        head.append(Syntax(text, "bash", theme="ansi_dark", word_wrap=True, background_color="default"))
+        head.append(Syntax(text, "bash", theme=THEME, word_wrap=True, background_color="default"))
         used += -(-len(text) // inner)                     # sarılmış komut satırı sayısı
         if cmd.desc:
             head.append(Text(clip(cmd.desc, inner), style="dim italic"))
@@ -512,7 +543,8 @@ def stream(
     project: str = typer.Option(None, "-p", "--project", envvar="AGENT_STREAM_PROJECT",
                                 help="proje/cwd filtresi (parça eşleşmesi)"),
     session: str = typer.Option(None, "-s", "--session", help="oturum etiketi öneki, örn. a3d1"),
-    all_tools: bool = typer.Option(False, "-a", "--all-tools", help="sadece Bash değil, tüm araçlar"),
+    all_tools: bool = typer.Option(True, "--all-tools/--bash-only", "-a/-B",
+                                   help="tüm araçlar (varsayılan) / yalnız Bash"),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="sadece komutlar, çıktı yok"),
     max_lines: int = typer.Option(12, "-n", "--max-lines", metavar="N", help="komut başına çıktı satırı sınırı"),
     max_cmd: int = typer.Option(10, "-m", "--max-cmd", metavar="N", help="komut bloğu satır sınırı (0 = sınırsız)"),
@@ -523,6 +555,8 @@ def stream(
     pair: bool = typer.Option(False, "--pair", help="komutu çıktısıyla birlikte, bittiğinde yaz"),
     desc: bool = typer.Option(True, "--desc/--no-desc", help="komut açıklamasını göster"),
     as_json: bool = typer.Option(False, "--json", help="satır satır JSON (NDJSON) yaz"),
+    theme: str = typer.Option("ansi_dark", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
+                              help="komut bloğu teması (ansi_dark, monokai, dracula, nord…)"),
     no_color: bool = typer.Option(False, "--no-color", help="rengi kapat (NO_COLOR da geçerli)"),
     root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
     version: bool = typer.Option(False, "-V", "--version", callback=version_cb, is_eager=True,
@@ -550,6 +584,7 @@ def stream(
     max_cmd = cfg_value(ctx, cfg, "max_cmd", max_cmd)
     stale = cfg_value(ctx, cfg, "stale", stale)
     project = cfg_value(ctx, cfg, "project", project)
+    set_theme(cfg_value(ctx, cfg, "theme", theme))
 
     if not root.is_dir():
         die(f"{root} yok", "Claude Code bu makinede hiç çalışmamış olabilir; --root ile başka bir kök verebilirsin.")
@@ -583,13 +618,17 @@ def stream(
 def dash(
     project: str = typer.Option(None, "-p", "--project", envvar="AGENT_STREAM_PROJECT", help="proje/cwd filtresi"),
     session: str = typer.Option(None, "-s", "--session", help="oturum etiketi öneki"),
-    all_tools: bool = typer.Option(False, "-a", "--all-tools", help="tüm araçlar"),
+    all_tools: bool = typer.Option(True, "--all-tools/--bash-only", "-a/-B",
+                                   help="tüm araçlar (varsayılan) / yalnız Bash"),
+    theme: str = typer.Option("ansi_dark", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
+                              help="komut bloğu teması (ansi_dark, monokai, dracula, nord…)"),
     lanes: int = typer.Option(4, "-c", "--columns", metavar="N", help="yan yana gösterilecek oturum sayısı"),
     stale: float = typer.Option(15, "--stale", metavar="DK", help="bu süredir sessiz oturumlar atlanır"),
     interval: float = typer.Option(0.2, "--interval", metavar="SN", help="yoklama aralığı"),
     root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
 ):
     """Paralel oturumları yan yana şeritlerde gösteren canlı pano."""
+    set_theme(theme)
     if not root.is_dir():
         die(f"{root} yok", "--root ile transcript kökünü verebilirsin.")
     console = setup_console(False)
@@ -670,11 +709,15 @@ def replay(
     tag: str = typer.Argument(..., help="oturum etiketi ya da tam id (agent-stream sessions ile bak)"),
     max_lines: int = typer.Option(6, "-n", "--max-lines", metavar="N", help="çıktı satır sınırı"),
     max_cmd: int = typer.Option(10, "-m", "--max-cmd", metavar="N", help="komut bloğu satır sınırı (0 = sınırsız)"),
-    all_tools: bool = typer.Option(False, "-a", "--all-tools", help="tüm araçlar"),
+    all_tools: bool = typer.Option(True, "--all-tools/--bash-only", "-a/-B",
+                                   help="tüm araçlar (varsayılan) / yalnız Bash"),
+    theme: str = typer.Option("ansi_dark", "--theme", metavar="AD", envvar="AGENT_STREAM_THEME",
+                              help="komut bloğu teması (ansi_dark, monokai, dracula, nord…)"),
     no_color: bool = typer.Option(False, "--no-color", help="rengi kapat"),
     root: Path = typer.Option(DEFAULT_ROOT, "--root", envvar="AGENT_STREAM_ROOT", help="transcript kökü"),
 ):
     """Geçmiş bir oturumun tüm komutlarını baştan yaz (takip etmez)."""
+    set_theme(theme)
     matches = [p for p in glob.glob(str(root / "*" / "*.jsonl")) if os.path.basename(p).startswith(tag)]
     if not matches:
         die(f"'{tag}' ile başlayan oturum yok", "agent-stream sessions --all ile etiketlere bakabilirsin.")

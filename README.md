@@ -22,6 +22,9 @@ asdash                        # paralel oturumlar için canlı pano
 Her oturumun 4 karakterlik bir etiketi (`a3d1`) ve id'sinden türeyen sabit bir rengi var;
 şerit çubuğu `▌` o renkte. Subagent'lar `⤷ subagent` ile işaretlenir.
 
+Araç işaretleri: `$` Bash · `▸` Read · `✎` Edit/Write · `⌕` Grep/Glob/WebSearch · `⇣` WebFetch ·
+`⤷` Task · `◇` Skill · `⚙` MCP (`mcp__trello__trello_list_cards` → `trello:list_cards`).
+
 ## Sık kullanılan bayraklar
 
 ```bash
@@ -29,7 +32,8 @@ astream -p myapp -n 6          # sadece myapp projesi, komut başına 6 satır �
 astream -s a3d1                # tek oturum
 astream -q                     # sadece komutlar, çıktı yok
 astream -m 4                   # uzun heredoc komutlarını 4 satırda kır (0 = sınırsız)
-astream -a                     # Bash dışındaki araçlar da (Read, Edit, Grep, Task…)
+astream -B                     # yalnız Bash (varsayılan: Read, Edit, Grep, Task, MCP dahil hepsi)
+astream --theme monokai        # komut bloğu teması: monokai, dracula, nord, github-dark…
 astream -b 20                  # açılışta son 20 komutu da göster
 astream --json | jq -r .command   # NDJSON, satır başına bir tamamlanmış komut
 ```
@@ -55,12 +59,17 @@ astream --json | jq -r .command   # NDJSON, satır başına bir tamamlanmış ko
 project = "myapp"
 max_lines = 8
 stale = 45
+theme = "monokai"
 ```
+
+Varsayılan tema `ansi_dark`: renkleri terminalin kendi paletinden alır, yani bir terminalde
+yeşil, VS Code'da mavi görünür. Sabit bir tema (`monokai`, `nord`, `dracula`…) her terminalde
+aynı çıkar; 24 bit renk desteklemeyen terminallerde en yakın renge yuvarlanır.
 
 ## Sınırlar
 
 - Cloud oturumları görünmez; yerel transcript yazmıyorlar.
-- MCP araç çağrıları `Bash` değil, `-a` ile gelirler.
+- Varsayılan tüm araçlar; `-B/--bash-only` akışı yalnız kabuk komutlarına indirir.
 - Yoklama 250 ms; göz kararı anlık ama tam senkron değil.
 - Transcript'ler varsayılan olarak 30 gün tutuluyor, `replay` o pencereyle sınırlı.
 
