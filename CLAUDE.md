@@ -81,8 +81,13 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `StreamView.end` | `self.c.file.flush()` | Rich boru hattında tamponlar; `agent-stream \| grep` canlı kalmalı |
 | `Reader.poll` | `'"tool_use"' not in line` ön elemesi | 10 MB'lık transcript'te satır başına `json.loads` pahalı; ilgisiz satırlar string testiyle elenir |
 | `Reader.poll` | `lines[-backfill * 6:]` + keep-set | Bir komut birkaç JSONL satırı eder; kaba pencere alınıp sonunda olay sayısına indirilir |
+| `Reader.files` | `subagents/**` glob'u | Subagent'lar ana transcript'e yazmıyor, `<proje>/<oturum>/subagents/agent-*.jsonl` altında ayrı dosyalarda duruyor. Eski glob (`*/*.jsonl`) onları hiç görmüyordu; `--no-subagents` bayrağı da bu yüzden boşa çalışıyordu (10.09) |
+| `Reader.files` | `full = now - self._scanned > self.rescan` | 2202 dosyayı 250 ms'de bir globlamak tur başına 19 ms yiyordu. Tam tarama 2 sn'de bir, ara turlarda yalnız takip edilen dosyalar: 0.01 ms. Bedeli, yeni bir oturumun akışa 2 sn gecikmeyle girmesi |
 | `Reader.files` | Stale filtresi yalnız **yeni** dosyaya | Takip edilen bir oturum sessizleşince akıştan düşmemeli |
 | `cmd_block` / `lane_panel` | `theme=THEME`, varsayılan `monokai` | `ansi_dark` rengi terminal paletinden alıyordu: tek renkli bir profilde (yeşil üstü siyah gibi) komutun her parçası aynı tonda çıkıyor, boyama bilgi taşımıyordu. Sabit tema iki terminalde de aynı; palet mirası isteyen `--theme ansi_dark` der |
+| `clip` | `cell_len` / `set_cell_size` | `len()` karakter sayıyordu: emoji ve CJK iki hücre kaplar, `🔴 …  ✅` satırı 36 karakter ama 38 hücre. Sarma noktası kayıp satır taşıyordu |
+| `head_text` | Açıklama başlık satırında | Ayrı `· açıklama` satırındayken blok altında kalıyordu; `-q` modunda bile ekranı heredoc gövdesi dolduruyor, ajanın ne yaptığı okunmuyordu (10.09 ekran görüntüsü) |
+| `dash_frame` | Yükseklik en dolu şeride göre | Sabit yükseklikte kısa çıktıda ekran boyu ölü boşluk kalıyordu; içeriğe göre panel panel değişse şeritlerin altı hizasını kaybeder ve her çıktı satırında düzen zıplardı. Ortası: hepsi eşit, en dolu şeridin ihtiyacı kadar |
 | `pretty_tool` | `UUID` sunucu adı → `mcp:` | Konnektör MCP sunucuları 36 karakterlik uuid adı taşıyor; ham hâli komut satırının yarısını yiyordu |
 | `_result` | `"stdout" in tur` koşulu | `toolUseResult` yalnız Bash'te `stdout`/`stderr` taşıyor; Read/Edit/MCP sonuçları `tool_result` bloğunda. Koşulsuz `tur.get("stdout")` bütün Bash dışı araçlara "çıktı yok" dedirtiyordu (10.09, tüm araçlar varsayılan olduktan sonra görüldü) |
 | `clean` | `SYSREM` deseni | `tool_result` içine eklenen `<system-reminder>` blokları kullanıcının komut çıktısı değil |

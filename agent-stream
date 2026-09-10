@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Iterable
 
 import typer
+from rich.cells import cell_len, set_cell_size
 from rich.columns import Columns
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
@@ -132,7 +133,8 @@ def clean(text: str | None) -> str:
 
 
 def clip(s: str, n: int) -> str:
-    return s if len(s) <= n else s[: n - 1] + "…"
+    """Terminal hücresiyle ölçer: emoji ve CJK karakterler iki hücre yer kaplar."""
+    return s if cell_len(s) <= n else set_cell_size(s, max(1, n - 1)) + "…"
 
 
 def parse_ts(iso: str | None) -> datetime:
@@ -165,18 +167,28 @@ class Cmd:
     text: str
     desc: str
     started: datetime
+    agent: str = ""
+    agent_type: str = ""
     ended: datetime | None = None
     out: str = ""
     err: str = ""
     ok: bool = True
 
     @property
+    def key(self) -> str:
+        return f"{self.sid}#{self.agent}" if self.agent else self.sid
+
+    @property
     def tag(self) -> str:
-        return self.sid[:4]
+        return self.agent[-4:] if self.agent else self.sid[:4]
+
+    @property
+    def label(self) -> str:
+        return f" ⤷ {self.agent_type or 'subagent'}" if self.sub else ""
 
     @property
     def lane(self) -> str:
-        return lane_of(self.sid)
+        return lane_of(self.key)
 
     @property
     def dur(self) -> float:
@@ -192,6 +204,8 @@ class Cmd:
         return {
             "ts": self.started.isoformat(timespec="seconds"),
             "session": self.sid,
+            "agent": self.agent,
+            "agent_type": self.agent_type,
             "cwd": self.cwd,
             "branch": self.branch,
             "subagent": self.sub,
@@ -212,6 +226,9 @@ class Reader:
                  all_tools: bool, subagents: bool, stale_min: float):
         self.root, self.project, self.session = root, project, session
         self.all_tools, self.subagents, self.stale_min = all_tools, subagents, stale_min
+        self.rescan = 2.0                              # tam tarama aralığı, saniye
+        self._scanned = 0.0
+        self._paths: list[str] = []
         self.offsets: dict[str, int] = {}
         self.open: dict[str, Cmd] = {}
         self.seen_files: set[str] = set()
@@ -219,10 +236,18 @@ class Reader:
     # -- dosya keşfi
     def files(self) -> Iterable[tuple[str, os.stat_result]]:
         now = time.time()
-        for path in glob.glob(str(self.root / "*" / "*.jsonl")):
+        full = now - self._scanned > self.rescan
+        if full:                                           # 2200+ dosyayı her turda taramak pahalı
+            self._paths = glob.glob(str(self.root / "*" / "*.jsonl"))
+            if self.subagents:                             # subagent'lar <oturum>/subagents/ altında
+                self._paths += glob.glob(str(self.root / "*" / "*" / "subagents" / "**" / "*.jsonl"),
+                                         recursive=True)
+            self._scanned = now
+        # Ara turlarda yalnız takip edilenlere bakılır; yenisi tam taramada yakalanır.
+        for path in (self._paths if full else list(self.seen_files)):
             if self.project and self.project.lower() not in path.lower():
                 continue
-            if self.session and not os.path.basename(path).startswith(self.session):
+            if self.session and self.session not in path:
                 continue
             try:
                 st = os.stat(path)
@@ -270,12 +295,14 @@ class Reader:
                 tool = block.get("name", "")
                 if not self.wanted(tool):
                     continue
-                sub = bool(entry.get("isSidechain"))
+                sub = bool(entry.get("isSidechain")) or bool(entry.get("agentId"))
                 if sub and not self.subagents:
                     continue
                 cmd = Cmd(
                     uid=block.get("id", ""), sid=entry.get("sessionId", "????"),
                     cwd=entry.get("cwd", ""), branch=entry.get("gitBranch", ""), sub=sub,
+                    agent=str(entry.get("agentId", "")),
+                    agent_type=str(entry.get("attributionAgent", "")),
                     tool=tool, text=self._summary(tool, block.get("input") or {}),
                     desc=str((block.get("input") or {}).get("description", "")),
                     started=parse_ts(entry.get("timestamp")),
@@ -340,14 +367,16 @@ def lane_print(console: Console, color: str, renderable: RenderableType, marker:
                       end="", highlight=False)
 
 
-def head_text(cmd: Cmd) -> Text:
+def head_text(cmd: Cmd, desc: bool = True) -> Text:
     t = Text(cmd.started.strftime("%H:%M:%S "), style="dim")
     t.append(cmd.tag, style=f"bold {cmd.lane}")
     t.append(f"  {short_path(cmd.cwd)}", style="dim")
     if cmd.branch and cmd.branch != "HEAD":
         t.append(f"  {cmd.branch}", style="dim italic")
     if cmd.sub:
-        t.append("  ⤷ subagent", style="dim italic")
+        t.append(f"  {cmd.label.strip()}", style="dim italic")
+    if desc and cmd.desc:
+        t.append(f"  · {cmd.desc}", style="italic")
     return t
 
 
@@ -382,12 +411,10 @@ class StreamView:
     def start(self, cmd: Cmd) -> None:
         self.c.print()
         self.last_uid = cmd.uid
-        lane_print(self.c, cmd.lane, head_text(cmd))
+        lane_print(self.c, cmd.lane, head_text(cmd, self.show_desc))
         marker = glyph_of(cmd.tool)
         color = self.c.is_terminal and not self.c.no_color
         lane_print(self.c, cmd.lane, cmd_block(cmd, color, self.max_cmd), marker)
-        if self.show_desc and cmd.desc:
-            lane_print(self.c, cmd.lane, Text(f"· {cmd.desc}", style="dim italic"))
 
     def end(self, cmd: Cmd) -> None:
         # Paralel komutlarda çıktı başka bir başlığın altına düşebilir: yeniden çapala.
@@ -412,7 +439,9 @@ class StreamView:
 
 @dataclass
 class Lane:
-    sid: str
+    key: str
+    tag: str = "????"
+    label: str = ""
     cwd: str = ""
     branch: str = ""
     running: Cmd | None = None
@@ -421,41 +450,53 @@ class Lane:
     seen: float = field(default_factory=time.time)
 
 
-def lane_panel(lane: Lane, height: int, width: int, max_cmd: int = 4) -> Panel:
-    """Tek oturum şeridi: üstte komut, altta terminal gibi aşağıya yapışan çıktı kuyruğu."""
-    color = lane_of(lane.sid)
+def lane_parts(lane: Lane, width: int, max_cmd: int) -> tuple[list[RenderableType], list[Text], int]:
+    """Şeridin baş bloğu, çıktı kuyruğu ve baş bloğun kapladığı satır sayısı."""
+    color = lane_of(lane.key)
     cmd = lane.running or lane.last
     inner = max(10, width - 4)
     head: list[RenderableType] = []
-    tail: list[RenderableType] = []
+    tail: list[Text] = []
     used = 0
 
-    if cmd:
-        # Komut şeritte de satır satır durur; heredoc tek satıra sıkıştırılınca okunmuyordu.
-        rows = [clip(l, inner * 2) for l in (cmd.text.splitlines() or [""])[:max_cmd]]
-        extra = len(cmd.text.splitlines()) - max_cmd
-        text = "\n".join(rows) + (f"\n… +{extra} satır komut" if extra > 0 else "")
-        head.append(Syntax(text, "bash", theme=THEME, word_wrap=True, background_color="default"))
-        used += sum(-(-len(l) // inner) or 1 for l in text.splitlines())
-        if cmd.desc:
-            head.append(Text(clip(cmd.desc, inner), style="dim italic"))
-            used += 1
-        if lane.running:
-            head.append(Columns([Spinner("dots", style=color),
-                                 Text(human_dur(lane.running.dur), style=color)], padding=(0, 1)))
-            used += 1
-        tail = [Text(clip(line, inner), style="dim") for line, _ in cmd.body]
-    else:
-        head.append(Text("bekliyor…", style="dim italic"))
-        used += 1
+    if not cmd:
+        return [Text("bekliyor…", style="dim italic")], [], 1
 
+    # Komut şeritte de satır satır durur; heredoc tek satıra sıkıştırılınca okunmuyordu.
+    rows = [clip(l, inner * 2) for l in (cmd.text.splitlines() or [""])[:max_cmd]]
+    extra = len(cmd.text.splitlines()) - max_cmd
+    text = "\n".join(rows) + (f"\n… +{extra} satır komut" if extra > 0 else "")
+    head.append(Syntax(text, "bash", theme=THEME, word_wrap=True, background_color="default"))
+    used += sum(-(-cell_len(l) // inner) or 1 for l in text.splitlines())
+    if cmd.desc:
+        head.append(Text(clip(cmd.desc, inner), style="italic"))
+        used += 1
+    if lane.running:
+        head.append(Columns([Spinner("dots", style=color),
+                             Text(human_dur(lane.running.dur), style=color)], padding=(0, 1)))
+        used += 1
+    tail = [Text(clip(line, inner), style="dim") for line, _ in cmd.body]
+    return head, tail, used
+
+
+def lane_need(lane: Lane, width: int, max_cmd: int) -> int:
+    """Şeridin hiç kırpılmadan isteyeceği panel yüksekliği."""
+    _, tail, used = lane_parts(lane, width, max_cmd)
+    return used + len(tail) + 3                            # boş satır + iki kenarlık
+
+
+def lane_panel(lane: Lane, height: int, width: int, max_cmd: int = 4) -> Panel:
+    head, tail, used = lane_parts(lane, width, max_cmd)
     room = max(1, height - 3 - used)
     body = Group(*head, Text(""), *tail[-room:])
 
-    title = Text(f"▌{lane.sid[:4]} ", style=f"bold {color}")
+    color = lane_of(lane.key)
+    title = Text(f"▌{lane.tag} ", style=f"bold {color}")
     title.append(short_path(lane.cwd), style="bold")
     if lane.branch and lane.branch != "HEAD":
         title.append(f" · {lane.branch}", style="dim")
+    if lane.label:
+        title.append(lane.label, style="dim italic")
     return Panel(
         body, title=title, title_align="left",
         subtitle=None if lane.running else (status_text(lane.last) if lane.last else None),
@@ -475,14 +516,15 @@ def dash_frame(lanes: dict[str, Lane], recent: list[Cmd], started: float,
     header.add_column(justify="right")
     left = Text("agent-stream", style="bold")
     left.append("  pano", style="dim")
-    right = Text(f"{len(active)} oturum", style="bold")
+    right = Text(f"{len(active)} şerit", style="bold")
     if hidden:
         right.append(f" (+{hidden} gizli)", style="dim")
     right.append(f" · {total} komut · ↑{human_dur(time.time() - started)}", style="dim")
     header.add_row(left, right)
 
-    height = max(9, console.height - 4 - min(len(recent), 5))
+    room = max(9, console.height - 4 - min(len(recent), 5))
     width = max(26, console.width // max(1, len(shown) or 1) - 1)
+    height = min(room, max([9] + [lane_need(l, width, max_cmd) for l in shown])) if shown else room
     body = Columns([lane_panel(l, height, width, max_cmd) for l in shown], equal=True, expand=True) \
         if shown else Panel(Text("aktif oturum yok — Claude Code'da bir komut çalıştır", style="dim italic"),
                             border_style="dim", height=height)
@@ -559,7 +601,7 @@ def stream(
                                    help="tüm araçlar (varsayılan) / yalnız Bash"),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="sadece komutlar, çıktı yok"),
     max_lines: int = typer.Option(12, "-n", "--max-lines", metavar="N", help="komut başına çıktı satırı sınırı"),
-    max_cmd: int = typer.Option(10, "-m", "--max-cmd", metavar="N", help="komut bloğu satır sınırı (0 = sınırsız)"),
+    max_cmd: int = typer.Option(6, "-m", "--max-cmd", metavar="N", help="komut bloğu satır sınırı (0 = sınırsız)"),
     backfill: int = typer.Option(0, "-b", "--backfill", metavar="N", help="açılışta son N komutu da göster"),
     stale: float = typer.Option(30, "--stale", metavar="DK", help="bu süredir sessiz oturumlar atlanır"),
     interval: float = typer.Option(0.25, "--interval", metavar="SN", help="yoklama aralığı"),
@@ -661,7 +703,8 @@ def dash(
     with Live(console=console, screen=True, refresh_per_second=8, transient=True) as live:
         while True:
             for kind, cmd in reader.poll():
-                lane = lanes_by_sid.setdefault(cmd.sid, Lane(cmd.sid))
+                lane = lanes_by_sid.setdefault(cmd.key, Lane(cmd.key))
+                lane.tag, lane.label = cmd.tag, cmd.label
                 lane.cwd, lane.branch, lane.seen = cmd.cwd, cmd.branch, time.time()
                 if kind == "start":
                     lane.running, total = cmd, total + 1
@@ -670,8 +713,8 @@ def dash(
                     recent.append(cmd)
                     recent[:] = recent[-20:]
             cutoff = time.time() - stale * 60
-            for sid in [s for s, l in lanes_by_sid.items() if l.seen < cutoff]:
-                del lanes_by_sid[sid]
+            for key in [k for k, l in lanes_by_sid.items() if l.seen < cutoff]:
+                del lanes_by_sid[key]
             live.update(dash_frame(lanes_by_sid, recent, started, total, console, lanes, max_cmd))
             time.sleep(interval)
 

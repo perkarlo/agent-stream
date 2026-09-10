@@ -20,7 +20,8 @@ asdash                        # paralel oturumlar için canlı pano
 | `astream replay a3d1` | geçmiş bir oturumun tüm komutlarını baştan yazar |
 
 Her oturumun 4 karakterlik bir etiketi (`a3d1`) ve id'sinden türeyen sabit bir rengi var;
-şerit çubuğu `▌` o renkte. Subagent'lar `⤷ subagent` ile işaretlenir.
+şerit çubuğu `▌` o renkte. Subagent'lar kendi etiketini, rengini ve panoda kendi şeridini alır,
+başlıkta `⤷ Explore` gibi tipiyle görünür (`--no-subagents` gizler).
 
 Araç işaretleri: `$` Bash · `▸` Read · `✎` Edit/Write · `⌕` Grep/Glob/WebSearch · `⇣` WebFetch ·
 `⤷` Task · `◇` Skill · `⚙` MCP (`mcp__trello__trello_list_cards` → `trello:list_cards`).
