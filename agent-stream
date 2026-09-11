@@ -128,6 +128,14 @@ def clean(text: str | None) -> str:
     return CTRL.sub("", ANSI.sub("", text)).rstrip()
 
 
+MD = re.compile(r"\*\*|__|`|^#+\s*|^[-*]\s+")
+
+
+def unmark(text: str) -> str:
+    """Tur özetinden markdown vurgusunu ayıklar: `**Hot fix indi:**` → `Hot fix indi:`."""
+    return MD.sub("", text).strip()
+
+
 def clip(s: str, n: int) -> str:
     """Terminal hücresiyle ölçer: emoji ve CJK karakterler iki hücre yer kaplar."""
     return s if cell_len(s) <= n else set_cell_size(s, max(1, n - 1)) + "…"
@@ -474,6 +482,7 @@ class Reader:
         self.open: dict[str, Cmd] = {}
         self.asks: dict[str, Note] = {}
         self.loops: set[str] = set()                       # ScheduleWakeup çağıran oturumlar
+        self.bg: dict[str, int] = {}                       # turda başlatılan arka plan işi sayısı
         self.seen_files: set[str] = set()
         self.watcher = make_watcher() if watch else PollWatcher()
         self.rescan = SAFETY_RESCAN if self.watcher.name == "poll" else EVENT_RESCAN
@@ -605,6 +614,11 @@ class Reader:
                     note = self._note(entry, "fire", self._prompt(content))
                     self.loops.add(note.key)
                     yield "fire", note
+                elif origin == "task-notification":        # arka plan işi bitti, oturum uyandı
+                    first = next((l for l in clean(content).splitlines() if l.strip()), "")
+                    note = self._note(entry, "fire", clip(unmark(first), 80), task=True)
+                    self.bg[note.key] = max(0, self.bg.get(note.key, 0) - 1)
+                    yield "fire", note
         elif typ == "assistant":
             usage = msg.get("usage") or {}
             tokens = sum(int(usage.get(k) or 0) for k in
@@ -620,7 +634,8 @@ class Reader:
                 key = self._note(entry, "turn").key
                 loop = key in self.loops                   # /loop uyanmayı bekliyor, seni değil
                 self.loops.discard(key)
-                yield "turn", self._note(entry, "turn", first.strip(), loop=loop)
+                bg = self.bg.get(key, 0)                   # arka plan işi turlar boyu sürer, bildirimle düşer
+                yield "turn", self._note(entry, "turn", unmark(first), loop=loop, bg=bg)
         elif typ == "system":
             if entry.get("subtype") == "api_error":
                 err = entry.get("error") or {}
@@ -664,6 +679,10 @@ class Reader:
                 tool = block.get("name", "")
                 if tool in ("ScheduleWakeup", "CronCreate"):
                     self.loops.add(self._note(entry, "ctx").key)
+                inp_ = block.get("input") or {}
+                if tool == "Monitor" or inp_.get("run_in_background") is True:
+                    k = self._note(entry, "ctx").key
+                    self.bg[k] = self.bg.get(k, 0) + 1
                 if not self.wanted(tool):
                     continue
                 sub = bool(entry.get("isSidechain")) or bool(entry.get("agentId"))
@@ -813,7 +832,8 @@ class StreamView:
         if n.kind == "human":
             head.append("  " + clip(n.text.replace("\n", " ⏎ "), width), style="bold")
         elif n.kind == "fire":
-            head.append("  " + clip(n.text, width) + "  · döngü uyandı", style="dim")
+            tail = "  · arka plan işi bitti" if n.extra.get("task") else "  · döngü uyandı"
+            head.append("  " + clip(n.text, width) + tail, style="dim")
         elif n.kind == "ask":
             head.append(f"  {n.text}", style="bold yellow")
             head.append("  · seni bekliyor", style="yellow")
@@ -821,8 +841,10 @@ class StreamView:
             head.append(f"  {n.extra.get('header', '')}: ", style="dim")
             head.append(clip(n.text, width), style="italic")
         elif n.kind == "turn":
-            head.append("  döngü, sıradaki uyanışı bekliyor" if n.extra.get("loop") else "  tur bitti",
-                        style="dim" if n.extra.get("loop") else "bold")
+            quiet = n.extra.get("loop") or n.extra.get("bg")
+            label = "  döngü, sıradaki uyanışı bekliyor" if n.extra.get("loop") \
+                else f"  arka plan işi bekliyor ({n.extra.get('bg')})" if n.extra.get("bg") else "  tur bitti"
+            head.append(label, style="dim" if quiet else "bold")
             if n.text:
                 head.append(f"  · {clip(n.text, width)}", style="dim italic")
         elif n.kind == "compact":
@@ -839,7 +861,7 @@ class StreamView:
                 lane_print(self.c, n.lane, Text(q, style="italic"))
             for o in n.extra.get("options", [])[:6]:
                 lane_print(self.c, n.lane, Text(f"○ {clip(o, width - 2)}", style="yellow"))
-        if self.bell and (n.kind == "ask" or (n.kind == "turn" and not n.extra.get("loop"))):
+        if self.bell and (n.kind == "ask" or (n.kind == "turn" and not (n.extra.get("loop") or n.extra.get("bg")))):
             ring()
         self.c.file.flush()
 
@@ -922,7 +944,7 @@ def apply(lanes: dict[str, Lane], kind: str, ev: Cmd | Note) -> tuple[Lane, bool
     elif kind == "answer":
         lane.waiting, lane.ask = "", None
     elif kind == "turn":
-        if ev.extra.get("loop"):
+        if ev.extra.get("loop") or ev.extra.get("bg"):
             lane.waiting, lane.turn, lane.loop = "", ev.text, True
         elif lane.waiting != "ask":
             fresh = lane.waiting != "turn"

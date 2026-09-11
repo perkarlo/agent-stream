@@ -33,7 +33,8 @@ tek satırdır, işareti şerit çubuğuna biner:
 | `?` | soru soruldu, seni bekliyor; altında seçenekler | `AskUserQuestion` / `ExitPlanMode` çağrısı açık |
 | `↩` | soruya verdiğin cevap | aynı çağrının sonucu |
 | `■` | tur bitti, seni bekliyor; yanında son cümle | `stop_reason: end_turn` |
-| `⟳` | döngü uyandı (`/loop`, cron); tur sonu seni beklemez | `origin`'siz slash komutu ya da `ScheduleWakeup` |
+| `⟳` | döngü uyandı (`/loop`, cron) ya da arka plan işi bitti; tur sonu seni beklemez | `origin`'siz slash komutu, `ScheduleWakeup`, `task-notification` |
+| `■` soluk | tur bitti ama `Monitor` ya da arka plan komutu sürüyor; bildirim uyandıracak | açık arka plan işi sayısı parantezde |
 | `⟲` | bağlam özetlendi | compaction |
 | `⚠` | api hatası | `system/api_error` |
 

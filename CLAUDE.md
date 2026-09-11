@@ -90,7 +90,8 @@ pano, `wait` ve `seed_lanes` aynı fonksiyonu çağırır.
 | `human` | `type=user`, `origin.kind=human`, içerik string | `prompt`, bekleme sıfırlanır, `loop=False` |
 | `fire` | `type=user`, `origin` yok, içerik `<command-message>` | `loop=True`; sonraki `turn` beklemez |
 | `ask` / `answer` | `AskUserQuestion` ya da `ExitPlanMode` `tool_use` / eşleşen `tool_result` | `waiting="ask"`, `ask` notu; cevapta sıfır |
-| `turn` | `type=assistant`, `stop_reason=end_turn`, metin bloğu olan satır, sidechain değil | `waiting="turn"`; `extra.loop` ise yalnız `turn` metni |
+| `turn` | `type=assistant`, `stop_reason=end_turn`, metin bloğu olan satır, sidechain değil | `waiting="turn"`; `extra.loop` ya da `extra.bg` ise beklemez, yalnız `turn` metni |
+| `fire` (task) | `origin.kind=task-notification` | `loop=True`, `bg` sayacı bir düşer |
 | `ctx` | her `assistant` satırındaki `usage` toplamı (input + cache_read + cache_creation) | `ctx`, `model`; akışta basılmaz, pano/wait çubuğu |
 | `compact` | `isCompactSummary` ya da `system/compact_boundary` | yalnız akışta satır |
 | `apierr` | `system/api_error` | `warn`; sonraki `start` siler |
@@ -149,6 +150,8 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `Reader._side` | `if not first: return` (turn) | Aynı API yanıtı transcript'te birkaç `assistant` satırına bölünür, hepsi `end_turn` taşır; metinsiz olanlar basılsa "tur bitti" iki üç kez düşüyordu (11.09 d204'de görüldü) |
 | `Reader._side` | `origin is None` + `<command-message>` → `fire` | `/loop` ve cron ateşlemeleri `origin` taşımıyor; insan satırı sayılsa watcher oturumu her 10 dakikada "seni bekliyor" diyordu |
 | `Reader._events` | `ScheduleWakeup`/`CronCreate` → `loops` | Dinamik döngü ateşlemeyi kendisi planlar; `end_turn` sonrası uyanmayı bekler, kullanıcıyı değil |
+| `Reader._events` | `Monitor` / `run_in_background` → `bg` sayacı | Arka plan işi varken `end_turn` kullanıcıyı değil bildirimi bekler; sayaç turlar boyu sürer, `task-notification` düşürür (11.09 ekran görüntüsü: "1 running task" varken "tur bitti" yazıyordu) |
+| `unmark` | tur özetinde `**`, backtick, `#` ayıklanır | Ajanın ilk cümlesi markdown; akışta `**Hot fix indi:**` diye ham düşüyordu |
 | `apply` | `turn`, `ask` varken ezmez | Soru sorulduktan sonra da `end_turn` gelir; soru daha somut bilgi, kaybolmamalı |
 | `cmd_dash` | Bekleyen şerit `stale`'in 4 katı | Sonsuz tutmak kapanmış oturumu panoda bırakıyordu; hiç ayrıcalık vermemek 15 dakikalık soruyu düşürüyordu |
 | `cmd_dash` | Açılışta `running` → `last` | Kuyruk tohumunda yarım kalan `tool_use` gerçekte bitmiş olabilir; spinner sonsuza dek dönerdi |
