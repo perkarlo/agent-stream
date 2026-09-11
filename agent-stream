@@ -1035,7 +1035,7 @@ class WebSink:
     def _state_html(self) -> str:
         from html import escape
         parts = []
-        for l in sorted(self.lanes.values(), key=lambda l: l.order):
+        for l in sorted(self.lanes.values(), key=lambda l: l.bar_order):
             if l.waiting == "ask" and l.ask:
                 parts.append(f'<span class="y">? {escape(l.tag)} {escape(l.ask.text)}</span>')
             elif l.waiting == "turn":
@@ -1152,6 +1152,12 @@ class Lane:
     def order(self) -> tuple:
         """Sıra: soru bekleyen · tur bitmiş · çalışan/son görülen."""
         return ({"ask": 0, "turn": 1}.get(self.waiting, 2), -self.seen)
+
+    @property
+    def bar_order(self) -> tuple:
+        """Telefon şeridi için sabit sıra; son görülmeye göre dizilince haplar her komutta zıplıyordu."""
+        rank = {"ask": 0, "turn": 1}.get(self.waiting, 2 if self.running else 3 if self.loop else 4)
+        return (rank, self.tag)
 
 
 def apply(lanes: dict[str, Lane], kind: str, ev: Cmd | Note) -> tuple[Lane, bool]:
