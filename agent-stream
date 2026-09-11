@@ -72,6 +72,7 @@ GLYPH = {
     "Bash": "$", "Read": "▸", "Edit": "✎", "Write": "✎", "NotebookEdit": "✎",
     "Grep": "⌕", "Glob": "⌕", "WebSearch": "⌕", "WebFetch": "⇣", "Task": "⤷", "Agent": "⤷",
     "Skill": "◇", "SlashCommand": "◇", "Artifact": "▤", "TodoWrite": "☑",
+    "Monitor": "⧗", "ScheduleWakeup": "⧗", "TaskOutput": "⤷", "TaskStop": "⤷", "ToolSearch": "⌕",
 }
 ASKS = {"AskUserQuestion": "soru", "ExitPlanMode": "plan onayı"}   # kullanıcıyı bekleten araçlar
 NOTE_GLYPH = {"human": "»", "fire": "⟳", "ask": "?", "answer": "↩", "turn": "■", "compact": "⟲", "apierr": "⚠"}
@@ -1017,7 +1018,7 @@ class WebSink:
             elif l.running:
                 parts.append(f'<span class="g">● {escape(l.tag)}</span>')
             elif l.loop:
-                parts.append(f'<span class="d">⟳ {escape(l.tag)}</span>')
+                parts.append(f'<span class="d">{"⧗" if l.bg else "⟳"} {escape(l.tag)}</span>')
         return "  ".join(parts)
 
     def feed(self, kind: str, ev: Cmd | Note) -> None:
@@ -1116,6 +1117,7 @@ class Lane:
     model: str = ""
     warn: str = ""
     loop: bool = False                # son tur ScheduleWakeup ile bitti: döngü
+    bg: int = 0                       # açık arka plan işi (Monitor, run_in_background)
 
     @property
     def order(self) -> tuple:
@@ -1146,6 +1148,7 @@ def apply(lanes: dict[str, Lane], kind: str, ev: Cmd | Note) -> tuple[Lane, bool
     elif kind == "turn":
         if ev.extra.get("loop") or ev.extra.get("bg"):
             lane.waiting, lane.turn, lane.loop = "", ev.text, True
+            lane.bg = int(ev.extra.get("bg") or 0)
         elif lane.waiting != "ask":
             fresh = lane.waiting != "turn"
             lane.waiting, lane.turn, lane.since, lane.loop = "turn", ev.text, ev.ts, False
@@ -1714,7 +1717,8 @@ def cmd_wait(args) -> None:
         elif r["state"] == "running":
             state, last = Text("● çalışıyor", style="green"), (l.running.text if l.running else "")
         elif l.loop:
-            state, last = Text("⟳ döngü", style="dim"), r["turn"]
+            state = Text(f"⧗ arka plan ({l.bg})" if l.bg else "⟳ döngü", style="dim")
+            last = r["turn"]
         else:
             state, last = Text("· boşta", style="dim"), r["turn"]
         table.add_row(
