@@ -54,7 +54,7 @@ SAFETY_RESCAN = 5.0                 # yoklamada güvenlik taraması, saniye
 EVENT_RESCAN = 30.0                 # olay arka ucunda: dizin olayı yeni dosyayı zaten söyler
 IDLE_STEPS = (0.25, 0.5, 1.0, 2.0)  # yoklama arka ucunun geri çekilme merdiveni
 WATCH_CAP = 512                     # izlenecek fd üst sınırı
-TAIL_BYTES = 256 * 1024             # pano ve wait açılışta dosyanın son bu kadarından durum kurar
+TAIL_BYTES = 1024 * 1024            # pano ve wait açılışta dosyanın son bu kadarından durum kurar
 CTX_WINDOW = 1_000_000              # bağlam çubuğunun tavanı; ayar dosyasında ctx_window
 WEB_PORT = 7373                     # --serve varsayılan kapısı; ayar dosyasında port
 WEB_WIDTH = 56                      # telefon sayfasının kolon genişliği
@@ -750,6 +750,14 @@ class Reader:
                     self.offsets[path] = fh.tell()
             except OSError:
                 continue
+            if mid and b"\n" not in raw:                   # kuyruk tek dev satırın içinde (ekran görüntüsü)
+                try:
+                    with open(path, "rb") as fh:
+                        fh.seek(max(0, st.st_size - 8 * self.tail))
+                        raw = fh.read()
+                        self.offsets[path] = fh.tell()
+                except OSError:
+                    continue
             if mid:                                        # kuyruğun ilk satırı yarım, atılır
                 raw = raw.split(b"\n", 1)[1] if b"\n" in raw else b""
             lines = raw.decode("utf-8", errors="replace").splitlines()
@@ -843,6 +851,8 @@ class StreamView:
     def note(self, n: Note) -> None:
         """Komut dışı olay tek satır; soru seçenekleriyle, tur sonu ilk cümlesiyle düşer."""
         g = NOTE_GLYPH.get(n.kind, "·")
+        if n.kind == "turn" and (n.extra.get("loop") or n.extra.get("bg")):
+            g = "⧗" if n.extra.get("bg") else "⟳"
         head = Text(n.ts.strftime("%H:%M:%S "), style="dim")
         head.append(n.tag, style=f"bold {n.lane}")
         width = max(self.c.width - 14, 240)              # satır sarılır; kesme yalnız çok uzunda
@@ -1029,7 +1039,8 @@ class WebSink:
                 wait = (datetime.now(tz=l.since.tzinfo) - l.since).total_seconds() if l.since else 0
                 parts.append(f'<span class="w">■ {escape(l.tag)} {short_dur(wait)}</span>')
             elif l.running:
-                parts.append(f'<span class="g">● {escape(l.tag)} {escape(os.path.basename(l.cwd) or "~")}</span>')
+                cwd = "~" if l.cwd.rstrip("/") == str(HOME) else os.path.basename(l.cwd) or "~"
+                parts.append(f'<span class="g">● {escape(l.tag)} {escape(cwd)}</span>')
             elif l.loop:
                 parts.append(f'<span class="d">{"⧗" if l.bg else "⟳"} {escape(l.tag)}</span>')
             else:
@@ -1703,7 +1714,8 @@ def cmd_wait(args) -> None:
     for l in lanes:
         wait = (now - l.since).total_seconds() if l.since else 0.0
         rows.append({
-            "session": l.key.split("#")[0], "tag": l.tag, "project": os.path.basename(l.cwd) or "~",
+            "session": l.key.split("#")[0], "tag": l.tag,
+            "project": "~" if l.cwd.rstrip("/") == str(HOME) else os.path.basename(l.cwd) or "~",
             "branch": l.branch, "state": l.waiting or ("running" if l.running else "loop" if l.loop else "idle"),
             "header": l.ask.text if l.ask else "",
             "question": l.ask.extra.get("question", "") if l.ask else "",
