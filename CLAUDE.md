@@ -162,6 +162,9 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `WebSink.feed` | `export_html(clear=True)` + `StringIO` truncate | Kayıt konsolu hem segment listesini hem dosyayı biriktirir; ikisi de boşaltılmazsa bellek akışla büyür |
 | `WebSink._emit` | `queue.Full` → istemci düşer | Telefonu uyuyan bir istemci kuyruğu doldurur; bloklamak ana akışı durdururdu |
 | `WebSink._sse` | 15 sn `: ping` | Bazı proxy/tarayıcılar sessiz SSE'yi keser; `EventSource` yeniden bağlanır ama halkayı baştan alır |
+| `LANES` | sekiz sabit hex | ANSI adları terminal paletinden, web `web_theme`'den okuyordu; aynı oturum iki yüzeyde farklı renkti (11.09 kullanıcı). Hex her yerde aynı, 256 renkte Rich yuvarlar |
+| `WebSink._bars` | `▌` span'ı → `div.l` + `border-left` | Glyph satır kutusunu (line-height 1.35) doldurmuyor, telefonda çubuk kesik kesik görünüyordu. Div satırından sonra `\n` basılmaz, parça sonundaki boş eleman atılır; ikisi de görünür boş satır üretiyordu |
+| `head_text` / `note` / `status_text` | taban stil boş, `dim` parça parça | `Text(..., style="dim")` tabanına eklenen `bold #hex` etiket HTML'de dim ile birleşip yarı renge iniyordu (`#8b2247`); terminal dim+bold'u yok sayıyordu |
 | `web_theme` | özel `TerminalTheme` | Rich'in `MONOKAI` terminal teması `green`'i #527618 basıyor; şerit renkleri telefonda okunmuyordu |
 | `lan_ip` | UDP `connect` numarası | Paket gitmez, yalnız çekirdeğin seçeceği kaynak adres okunur; `gethostbyname` çoğu Mac'te 127.0.0.1 döner |
 | `announce` | QR `out=sys.stderr` | segno varsayılan stdout'a basar; stdout veri kanalı (2 numaralı kural) |

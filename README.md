@@ -47,7 +47,8 @@ Pano açılışta her dosyanın son 256 KB'ından durumu kurar; akış açılı�
 satırların hepsini kapatır. `-q` çıktıyı gizler ama patlayan komutun ilk 3 satırı yine düşer.
 
 Her oturumun 4 karakterlik bir etiketi (`a3d1`) ve id'sinden türeyen sabit bir rengi var;
-şerit çubuğu `▌` o renkte. Subagent'lar kendi etiketini, rengini ve panoda kendi şeridini alır,
+şerit çubuğu `▌` o renkte. Renkler sekiz sabit hex (monokai tonları), terminal paletinden
+bağımsız: aynı oturum terminalde ve telefonda aynı renk. 256 renkli terminal en yakına yuvarlar. Subagent'lar kendi etiketini, rengini ve panoda kendi şeridini alır,
 başlıkta `⤷ Explore` gibi tipiyle görünür (`--no-subagents` gizler).
 
 Araç işaretleri: `$` Bash · `▸` Read · `✎` Edit/Write · `⌕` Grep/Glob/WebSearch · `⇣` WebFetch ·
@@ -65,7 +66,8 @@ boyama, `»` `?` `■` satırları terminaldekiyle aynı, 56 kolon. Tepede sabit
 özeti: `? b7c9 Şema seçimi · ■ d204 1sa 9dk · ● e58f`. Sonradan bağlanan tarayıcı son
 300 parçayı da alır. Kaydırıp yukarı çıkınca takip durur, `↓ takip` düğmesi geri döndürür.
 
-Tepe şerit haplardan oluşur: sarı `? b7c9 Şema seçimi` soru, beyaz `■ d204 3dk` tur bitti,
+Şerit çubuğu sayfada CSS kenarlığıdır, `▌` glyph'i değil: glyph satır kutusunu doldurmuyor,
+çubuk kesik görünüyordu. Tepe şerit haplardan oluşur: sarı `? b7c9 Şema seçimi` soru, beyaz `■ d204 3dk` tur bitti,
 yeşil `● e58f myapp` çalışıyor, gri `⟳`/`⧗` döngü ya da arka plan işi.
 
 Sunucu yalnız okur, yalnız o rastgele yolu bilene cevap verir, başka her yol 404. Yine de

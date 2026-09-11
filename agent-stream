@@ -67,7 +67,7 @@ THEME = "monokai"                   # komut bloğunun renk teması; --theme ile 
 
 # ─── Şerit renkleri ─────────────────────────────────────────────────────────
 # Renk oturum id'sinden türer: takipçi yeniden başlasa da aynı oturum aynı renkte.
-LANES = ["cyan", "magenta", "green", "yellow", "blue", "bright_magenta", "bright_cyan", "bright_red"]
+LANES = ["#66d9ef", "#f92672", "#a6e22e", "#e6db74", "#ae81ff", "#fd971f", "#a1efe4", "#ff79c6"]
 GLYPH = {
     "Bash": "$", "Read": "▸", "Edit": "✎", "Write": "✎", "NotebookEdit": "✎",
     "Grep": "⌕", "Glob": "⌕", "WebSearch": "⌕", "WebFetch": "⇣", "Task": "⤷", "Agent": "⤷",
@@ -807,7 +807,8 @@ def lane_print(console: Console, color: str, renderable: RenderableType, marker:
 
 
 def head_text(cmd: Cmd, desc: bool = True) -> Text:
-    t = Text(cmd.started.strftime("%H:%M:%S "), style="dim")
+    t = Text()                                             # taban stil dim olursa HTML'de etiket de solar
+    t.append(cmd.started.strftime("%H:%M:%S "), style="dim")
     t.append(cmd.tag, style=f"bold {cmd.lane}")
     t.append(f"  {short_path(cmd.cwd)}", style="dim")
     if cmd.branch and cmd.branch != "HEAD":
@@ -837,7 +838,8 @@ def cmd_block(cmd: Cmd, color: bool, max_cmd: int = 0) -> RenderableType:
 def status_text(cmd: Cmd, prefix: str = "") -> Text:
     n = len(cmd.body)
     mark, style = ("✓", "green") if cmd.ok else ("✗", "red")
-    t = Text(prefix, style="dim")
+    t = Text()
+    t.append(prefix, style="dim")
     t.append(mark, style=style)
     t.append(f" {human_dur(cmd.dur)}", style="dim")
     t.append(f" · {n} satır" if n else " · çıktı yok", style="dim")
@@ -856,7 +858,8 @@ class StreamView:
         g = NOTE_GLYPH.get(n.kind, "·")
         if n.kind == "turn" and (n.extra.get("loop") or n.extra.get("bg")):
             g = "⧗" if n.extra.get("bg") else "⟳"
-        head = Text(n.ts.strftime("%H:%M:%S "), style="dim")
+        head = Text()
+        head.append(n.ts.strftime("%H:%M:%S "), style="dim")
         head.append(n.tag, style=f"bold {n.lane}")
         width = max(self.c.width - 14, 240)              # satır sarılır; kesme yalnız çok uzunda
         head.overflow = "fold"
@@ -931,10 +934,11 @@ WEB_PAGE = """<!doctype html><html lang="tr"><head><meta charset="utf-8">
 <title>agent-stream</title>
 <style>
 body{margin:0;background:#1e1f1c;color:#f8f8f2;font:12px/1.35 ui-monospace,Menlo,monospace}
-div#b{position:sticky;top:0;background:#2d2e28;border-bottom:1px solid #5a594c;padding:7px 8px;
-   white-space:nowrap;overflow-x:auto;display:flex;gap:6px;align-items:center}
-div#b::before{content:"agent-stream";color:#75715e;margin-right:4px}
-div#b span{padding:2px 8px;border-radius:10px;background:#3e3d32;color:#f8f8f2}
+div#b{position:sticky;top:0;background:#2d2e28;border-bottom:1px solid #5a594c;padding:12px 10px;
+   white-space:nowrap;overflow-x:auto;display:flex;gap:8px;align-items:center;font-size:15px}
+div#b::before{content:"agent-stream";color:#75715e;margin-right:6px;font-size:12px}
+div#b span{padding:5px 12px;border-radius:14px;background:#3e3d32;color:#f8f8f2}
+pre#s div.l{border-left:4px solid;padding-left:5px;margin-left:1px}
 div#b .y{background:#e6db74;color:#272822;font-weight:bold}
 div#b .w{background:#f8f8f2;color:#272822;font-weight:bold}
 div#b .g{color:#a6e22e}#b .d{color:#a5a396}
@@ -1032,6 +1036,22 @@ class WebSink:
             for q in dead:
                 self.clients.remove(q)
 
+    _BAR = re.compile(r'^<span style="([^"]*?color: (#[0-9a-f]{6})[^"]*)">▌(.*?)</span>(.*)$')
+
+    def _bars(self, html: str) -> str:
+        """`▌` glyph'i satır kutusunu doldurmuyor, çubuk kesik görünüyordu; satır div + sol kenarlık olur."""
+        out = []
+        lines = html.split("\n")
+        if lines and lines[-1] == "":                      # parça sonu \n div'den sonra boş satır olur
+            lines.pop()
+        for line in lines:
+            m = self._BAR.match(line)
+            if m:
+                out.append(f'<div class="l" style="border-color:{m[2]}"><span style="{m[1]}">{m[3]}</span>{m[4]}</div>')
+            else:
+                out.append(line + "\n")
+        return "".join(out)
+
     def _state_html(self) -> str:
         from html import escape
         parts = []
@@ -1063,7 +1083,7 @@ class WebSink:
         self.rec.file.seek(0)
         self.rec.file.truncate()
         if html.strip():
-            self._emit("message", html)
+            self._emit("message", self._bars(html))
         if kind != "ctx":
             self._emit("state", self._state_html())
 
