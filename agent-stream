@@ -777,6 +777,9 @@ class Reader:
             starts = [e for e in events if e[0] == "start"]
             keep = {c.uid for _, c in starts[-backfill:]}
             events = [(k, c) for k, c in events if isinstance(c, Note) or c.uid in keep]
+        # Aynı turda birkaç dosyadan gelen olaylar zaman sırasına dizilir; kararlı sıralama çiftleri korur.
+        events.sort(key=lambda e: (e[1].ended or e[1].started) if isinstance(e[1], Cmd) and e[0] == "end"
+                    else e[1].started if isinstance(e[1], Cmd) else e[1].ts)
         self._idle = 0 if events else min(self._idle + 1, len(IDLE_STEPS) - 1)
         return events
 

@@ -148,6 +148,7 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `main` | `except BrokenPipeError` | `agent-stream \| head` boruyu kapatınca traceback basılmamalı |
 | `Reader.poll` | `MARKS` ön elemesi | Tek `"tool_use"` testi notları kaçırıyordu; `<command-message>` de listede çünkü döngü ateşlemesinin `origin` alanı yok, başka hiçbir imzası da yok (11.09) |
 | `Reader.poll` | `TAIL_BYTES` 1 MB + tek satırsa 8 katı | Ekran görüntüsü sonuçları transcript'e 850 KB'lık tek satır yazıyor; 256 KB'lık kuyruk o satırın içine düşünce `wait` oturumu hiç görmüyordu (11.09 e58f) |
+| `Reader.poll` | tur sonunda zaman damgasıyla kararlı sıralama | Olaylar dosya sırasıyla geliyordu; iki oturum aynı saniyelerde yazınca akışta 05:30:42 satırı 05:30:40'tan önce düşüyordu (11.09 telefon). `end` için `ended`, `start` için `started`, not için `ts` |
 | `Reader.poll` | `mid` → ilk satır atılır | Kuyruktan başlayınca ilk satır yarım JSON; `json.loads` zaten atar ama bir sonraki satır yanlış birleşmesin diye baştan kesilir |
 | `Reader._side` | `if not first: return` (turn) | Aynı API yanıtı transcript'te birkaç `assistant` satırına bölünür, hepsi `end_turn` taşır; metinsiz olanlar basılsa "tur bitti" iki üç kez düşüyordu (11.09 d204'de görüldü) |
 | `Reader._side` | `origin is None` + `<command-message>` → `fire` | `/loop` ve cron ateşlemeleri `origin` taşımıyor; insan satırı sayılsa watcher oturumu her 10 dakikada "seni bekliyor" diyordu |
