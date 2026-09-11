@@ -7,6 +7,7 @@ stale = 45          # kaç dakikadır sessiz oturumlar atlanır
 theme = "monokai"   # komut bloğu teması
 bell = false        # soru ve tur sonunda terminal zili (--bell)
 ctx_window = 1000000  # bağlam çubuğunun tavanı, token
+port = 7373         # --serve kapısı
 [dash]
 max_cmd = 6         # panoda alt komut bazlı bölüm de var
 [wait]

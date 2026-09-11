@@ -64,7 +64,7 @@ for mod in $(grep -oE '^(import|from) [a-z_]+' agent-stream | awk '{print $2}' |
 done
 uninstalled=""
 for d in $deps; do
-  grep -qE "^(import|from) $d" agent-stream || uninstalled="$uninstalled $d"
+  grep -qE "^[[:space:]]*(import|from) $d" agent-stream || uninstalled="$uninstalled $d"
 done
 if [ -z "$undeclared$uninstalled" ]; then
   ok "bağımlılık bloğu importlarla tutarlı: $(echo "$deps" | tr '\n' ' ')"

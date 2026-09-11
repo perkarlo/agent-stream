@@ -11,7 +11,7 @@ dosyalık Python CLI. Kaynak, oturumların kendi yazdığı transcript'ler:
 
 ```
 .
-├── agent-stream                # tek çalıştırılabilir; tüm kod burada
+├── agent-stream                # tek çalıştırılabilir; tüm kod burada (WebSink: --serve sunucusu)
 ├── bench/bench.py              # ölçüm takımı: boşta CPU, tarama, kare maliyeti
 ├── README.md                   # kullanıcı dokümanı (görünümler, bayraklar, ayar)
 ├── CLAUDE.md                   # bu dosya
@@ -46,11 +46,12 @@ Bunlar bilinçli kararlar. Değiştirmeden önce burada neden yazdığına bak.
 | 14 | Ölçüm süreç **içinden** yapılır | `time.process_time`, sabit duvar penceresi. `RUSAGE_CHILDREN` yorumlayıcı açılışını da sayar ve boş kökte bile %1,9 gösterir |
 | 15 | Ayar dosyası **her** alt komutta okunur | `merged_config(ctx)`: `[genel]` + alt komutun kendi bölümü. Yalnız `stream`'de okunması, `theme` yazan kullanıcıya panoda başka renk gösteriyordu |
 | 16 | Bekleme sinyali **yalnız transcript'ten** | Süreç listesi, pencere başlığı, uygulama durumu okunmaz. `end_turn` + sonrasında insan satırı yok = bekliyor; oturum kapatılmış olsa da öyle görünür, bu kabul edilen yanlış pozitif (11.09) |
+| 18 | Web sunucu **yalnız okur, yalnız dinler** | `--serve` SSE ile HTML parçası yayınlar; POST yok, telefondan oturuma yazma yok (1 numaralı kural). `0.0.0.0`'a bağlanır çünkü amaç telefon; kilit rastgele yol, başka her yol 404. Tailscale yok, ev ağı var (11.09 kullanıcı kararı) |
 | 17 | `--json` her olayı `event` alanıyla verir | Notlar da NDJSON'a düşer; `.command` notlarda yok, tüketici `.command // empty` der. Notları ayrı bayrağa saklamak, zil/bildirim yazan betikleri iki akış dinlemeye zorlardı |
 
 ## Python Standartları
 
-Tek dosya, PEP 723 inline bağımlılık bloğu (`rich`), shebang `uv run --script`. Argüman
+Tek dosya, PEP 723 inline bağımlılık bloğu (`rich`, `segno`), shebang `uv run --script`. Argüman
 ayrıştırma stdlib `argparse` ile: typer tek başına açılışa 34 ms ekliyordu. Ağır modüller
 (`rich.syntax`/pygments, `rich.live`, `rich.panel`, `ctypes`) kullanıldıkları fonksiyonun içinde
 içe aktarılır; `--json` yolu pygments'i hiç yüklemez.
@@ -156,6 +157,12 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `cmd_dash` | Bekleyen şerit `stale`'in 4 katı | Sonsuz tutmak kapanmış oturumu panoda bırakıyordu; hiç ayrıcalık vermemek 15 dakikalık soruyu düşürüyordu |
 | `cmd_dash` | Açılışta `running` → `last` | Kuyruk tohumunda yarım kalan `tool_use` gerçekte bitmiş olabilir; spinner sonsuza dek dönerdi |
 | `ctx_bar` | `CTX_WINDOW` tek sabit | Modele göre pencere tablosu tahmin olurdu; sayı ham gösterilir, çubuk `ctx_window` ayarıyla ölçeklenir |
+| `WebSink.feed` | `export_html(clear=True)` + `StringIO` truncate | Kayıt konsolu hem segment listesini hem dosyayı biriktirir; ikisi de boşaltılmazsa bellek akışla büyür |
+| `WebSink._emit` | `queue.Full` → istemci düşer | Telefonu uyuyan bir istemci kuyruğu doldurur; bloklamak ana akışı durdururdu |
+| `WebSink._sse` | 15 sn `: ping` | Bazı proxy/tarayıcılar sessiz SSE'yi keser; `EventSource` yeniden bağlanır ama halkayı baştan alır |
+| `web_theme` | özel `TerminalTheme` | Rich'in `MONOKAI` terminal teması `green`'i #527618 basıyor; şerit renkleri telefonda okunmuyordu |
+| `lan_ip` | UDP `connect` numarası | Paket gitmez, yalnız çekirdeğin seçeceği kaynak adres okunur; `gethostbyname` çoğu Mac'te 127.0.0.1 döner |
+| `announce` | QR `out=sys.stderr` | segno varsayılan stdout'a basar; stdout veri kanalı (2 numaralı kural) |
 | `cmd_wait` | `waiting_s` yalnız beklerken | `since` cevap sonrası da duruyor; "boşta" satırında süre yanıltıyordu |
 
 ## Bilinen Sınırlar

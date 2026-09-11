@@ -53,6 +53,23 @@ başlıkta `⤷ Explore` gibi tipiyle görünür (`--no-subagents` gizler).
 Araç işaretleri: `$` Bash · `▸` Read · `✎` Edit/Write · `⌕` Grep/Glob/WebSearch · `⇣` WebFetch ·
 `⤷` Task · `◇` Skill · `⚙` MCP (`mcp__trello__trello_list_cards` → `trello:list_cards`).
 
+## Telefonda
+
+```bash
+astream -q --serve            # aynı akış ev ağında; adres ve QR terminale basılır
+```
+
+Terminal çıktısı aynen sürer; yanına `http://192.168.x.x:7373/k/<rastgele>/` gelir ve QR'ı
+telefonla okutursun. Sayfa Rich'in kendi HTML çıktısını SSE ile alır: şerit çubuğu, monokai
+boyama, `»` `?` `■` satırları terminaldekiyle aynı, 56 kolon. Tepede sabit şerit `wait`'in
+özeti: `? b7c9 Şema seçimi · ■ d204 1sa 9dk · ● e58f`. Sonradan bağlanan tarayıcı son
+300 parçayı da alır. Kaydırıp yukarı çıkınca takip durur, `↓ takip` düğmesi geri döndürür.
+
+Sunucu yalnız okur, yalnız o rastgele yolu bilene cevap verir, başka her yol 404. Yine de
+transcript'te komut çıktıları ve sunucu adları var: yalnız güvendiğin ağda aç. Kapı `--port`,
+ayar dosyasında `port`, ortamda `AGENT_STREAM_PORT`. `asdash --serve` de çalışır; pano
+terminalde, akış telefonda.
+
 ## Sık kullanılan bayraklar
 
 ```bash
@@ -93,6 +110,7 @@ stale = 45
 theme = "monokai"
 bell = true
 ctx_window = 1000000
+port = 7373
 ```
 
 Varsayılan tema `monokai`: her terminalde aynı çıkar, 24 bit renk desteklemeyen terminallerde
@@ -126,6 +144,7 @@ Kurulamayan arka uç sessizce yoklamaya düşer, davranış değişmez.
 ## Sınırlar
 
 - Cloud oturumları görünmez; yerel transcript yazmıyorlar.
+- `--serve` şifresiz HTTP; rastgele yol tek kilit. Kafe Wi-Fi'sinde açma.
 - Varsayılan tüm araçlar; `-B/--bash-only` akışı yalnız kabuk komutlarına indirir.
 - Yoklama 250 ms; göz kararı anlık ama tam senkron değil.
 - Transcript'ler varsayılan olarak 30 gün tutuluyor, `replay` ve `stats` o pencereyle sınırlı.

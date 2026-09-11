@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["rich>=13.7"]
+# dependencies = ["rich>=13.7", "segno>=1.6"]
 # ///
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  agent-stream — Claude Code oturumlarının komut akışı                     ║
@@ -12,6 +12,7 @@
 # ║    3) Liste:     agent-stream sessions                                   ║
 # ║    4) Oynatma:   agent-stream replay <etiket>                            ║
 # ║    5) Makine:    agent-stream --json                                     ║
+# ║    6) Telefon:   agent-stream --serve  (ev ağında, QR terminalde)        ║
 # ║                                                                          ║
 # ║  Kaynak: ~/.claude/projects/<proje>/<session>.jsonl — salt okunur.       ║
 # ║  Hiçbir oturuma yazmaz, hook kurmaz, süreç başlatmaz.                    ║
@@ -55,6 +56,9 @@ IDLE_STEPS = (0.25, 0.5, 1.0, 2.0)  # yoklama arka ucunun geri çekilme merdiven
 WATCH_CAP = 512                     # izlenecek fd üst sınırı
 TAIL_BYTES = 256 * 1024             # pano ve wait açılışta dosyanın son bu kadarından durum kurar
 CTX_WINDOW = 1_000_000              # bağlam çubuğunun tavanı; ayar dosyasında ctx_window
+WEB_PORT = 7373                     # --serve varsayılan kapısı; ayar dosyasında port
+WEB_WIDTH = 56                      # telefon sayfasının kolon genişliği
+WEB_RING = 300                      # geç bağlanan istemciye gönderilen geçmiş parça sayısı
 MARKS = ('"tool_use"', '"tool_result"', '"kind":"human"', '"kind":"task-notification"',
          '<command-message>', '"end_turn"',
          '"isCompactSummary":true', '"api_error"', '"compact_boundary"')
@@ -897,6 +901,198 @@ class StreamView:
         self.c.file.flush()
 
 
+# ─── Web sunucu ─────────────────────────────────────────────────────────────
+
+WEB_PAGE = """<!doctype html><html lang="tr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agent-stream</title>
+<style>
+body{margin:0;background:#1e1f1c;color:#f8f8f2;font:12px/1.35 ui-monospace,Menlo,monospace}
+#b{position:sticky;top:0;background:#272822;border-bottom:1px solid #49483e;padding:6px 8px;
+   white-space:nowrap;overflow-x:auto}
+#b .y{color:#e6db74;font-weight:bold}#b .g{color:#a6e22e}#b .d{color:#75715e}#b .w{font-weight:bold}
+#b:empty::before{content:"bekleyen yok";color:#75715e}
+pre{margin:0;padding:6px 8px 40px;white-space:pre;overflow-x:auto}
+#s>span{display:block}
+#f{position:fixed;right:10px;bottom:10px;background:#49483e;color:#f8f8f2;border:0;border-radius:14px;
+   padding:6px 12px;font:inherit;display:none}
+@media (max-width:480px){body{font-size:10.5px}}
+</style></head><body><div id="b"></div><pre id="s"></pre><button id="f">↓ takip</button>
+<script>
+const s=document.getElementById('s'),b=document.getElementById('b'),f=document.getElementById('f');
+let follow=true;
+const bottom=()=>window.scrollTo(0,document.body.scrollHeight);
+window.addEventListener('scroll',()=>{follow=window.innerHeight+window.scrollY>=document.body.scrollHeight-40;
+  f.style.display=follow?'none':'block'});
+f.onclick=()=>{follow=true;bottom()};
+const es=new EventSource('events');
+es.onmessage=e=>{const sp=document.createElement('span');sp.innerHTML=JSON.parse(e.data);s.appendChild(sp);
+  while(s.children.length>%d)s.removeChild(s.firstChild);if(follow)bottom()};
+es.addEventListener('state',e=>{b.innerHTML=JSON.parse(e.data)});
+</script></body></html>""" % WEB_RING
+
+
+def web_theme():
+    """Tarayıcı paleti: Rich'in MONOKAI terminal teması ANSI adlarını koyu basıyor, şerit renkleri kayboluyordu."""
+    from rich.terminal_theme import TerminalTheme
+    normal = [(39, 40, 34), (249, 38, 114), (166, 226, 46), (230, 219, 116),
+              (102, 217, 239), (174, 129, 255), (161, 239, 228), (248, 248, 242)]
+    bright = [(117, 113, 94), (255, 97, 136), (185, 245, 90), (255, 236, 140),
+              (140, 230, 250), (196, 160, 255), (190, 250, 240), (255, 255, 255)]
+    return TerminalTheme((30, 31, 28), (248, 248, 242), normal, bright)
+
+
+def lan_ip() -> str:
+    """Ev ağındaki adres; UDP soketi bağlanmaz, yalnız yönlendirme tablosuna bakar."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("10.255.255.255", 1))
+            return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
+class WebSink:
+    """Akışı HTML parçaları olarak SSE ile yayınlar; rastgele yol dışında hiçbir şey vermez."""
+
+    def __init__(self, port: int, max_lines: int, show_desc: bool, show_output: bool, max_cmd: int):
+        import io
+        import secrets
+        import threading
+        from collections import deque
+        from http.server import ThreadingHTTPServer
+        self.token = secrets.token_urlsafe(9)
+        self.lock = threading.Lock()
+        self.clients: list = []
+        self.ring: deque = deque(maxlen=WEB_RING)
+        self.state = ""
+        self.lanes: dict[str, Lane] = {}
+        self.rec = Console(record=True, file=io.StringIO(), width=WEB_WIDTH, force_terminal=True,
+                           color_system="truecolor", highlight=False, soft_wrap=False)
+        self.view = StreamView(self.rec, max_lines, show_desc, show_output, max_cmd)
+        self.theme = web_theme()
+        self.server = ThreadingHTTPServer(("0.0.0.0", port), self._handler())
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    @property
+    def url(self) -> str:
+        return f"http://{lan_ip()}:{self.port}/k/{self.token}/"
+
+    def announce(self, console: Console) -> None:
+        """Adres ve QR stderr'e; stdout veri kanalı."""
+        import segno
+        console.print(f"[bold]telefon:[/] {self.url}", highlight=False)
+        segno.make(self.url, error="l").terminal(out=sys.stderr, compact=True, border=1)
+
+    # -- yayın
+    def _emit(self, event: str, payload: str) -> None:
+        import queue
+        item = (event, json.dumps(payload, ensure_ascii=False))
+        with self.lock:
+            if event == "message":
+                self.ring.append(item)
+            else:
+                self.state = item[1]
+            dead = []
+            for q in self.clients:
+                try:
+                    q.put_nowait(item)
+                except queue.Full:
+                    dead.append(q)
+            for q in dead:
+                self.clients.remove(q)
+
+    def _state_html(self) -> str:
+        from html import escape
+        parts = []
+        for l in sorted(self.lanes.values(), key=lambda l: l.order):
+            if l.waiting == "ask" and l.ask:
+                parts.append(f'<span class="y">? {escape(l.tag)} {escape(l.ask.text)}</span>')
+            elif l.waiting == "turn":
+                wait = (datetime.now(tz=l.since.tzinfo) - l.since).total_seconds() if l.since else 0
+                parts.append(f'<span class="w">■ {escape(l.tag)} {short_dur(wait)}</span>')
+            elif l.running:
+                parts.append(f'<span class="g">● {escape(l.tag)}</span>')
+            elif l.loop:
+                parts.append(f'<span class="d">⟳ {escape(l.tag)}</span>')
+        return "  ".join(parts)
+
+    def feed(self, kind: str, ev: Cmd | Note) -> None:
+        apply(self.lanes, kind, ev)
+        if isinstance(ev, Note):
+            if kind != "ctx":
+                self.view.note(ev)
+        elif kind == "start":
+            self.view.start(ev)
+        else:
+            self.view.end(ev)
+        html = self.rec.export_html(theme=self.theme, clear=True, code_format="{code}", inline_styles=True)
+        self.rec.file.seek(0)
+        self.rec.file.truncate()
+        if html.strip():
+            self._emit("message", html)
+        if kind != "ctx":
+            self._emit("state", self._state_html())
+
+    # -- http
+    def _handler(self):
+        import queue
+        from http.server import BaseHTTPRequestHandler
+        sink = self
+        page, events = f"/k/{self.token}/", f"/k/{self.token}/events"
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):                     # erişim logu stderr'i kirletmesin
+                pass
+
+            def do_GET(self):
+                if self.path.rstrip("/") + "/" == page:
+                    body = WEB_PAGE.encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif self.path == events:
+                    self._sse()
+                else:
+                    self.send_response(204 if self.path == "/favicon.ico" else 404)
+                    self.end_headers()
+
+            def _sse(self):
+                q: queue.Queue = queue.Queue(maxsize=1000)
+                with sink.lock:
+                    sink.clients.append(q)
+                    backlog = [("state", sink.state)] + list(sink.ring)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                try:
+                    for ev, data in backlog:
+                        if data:
+                            self.wfile.write(f"event: {ev}\ndata: {data}\n\n".encode())
+                    self.wfile.flush()
+                    while True:
+                        try:
+                            ev, data = q.get(timeout=15)
+                            self.wfile.write(f"event: {ev}\ndata: {data}\n\n".encode())
+                        except queue.Empty:
+                            self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                finally:
+                    with sink.lock:
+                        if q in sink.clients:
+                            sink.clients.remove(q)
+
+        return H
+
+
 # ─── Pano görünümü ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -1161,6 +1357,7 @@ EXAMPLES = """\
   agent-stream --pair -q             komutu çıktısıyla birlikte, sade
   agent-stream dash                  paralel oturumlar için canlı pano
   agent-stream -q --bell             sade akış; soru ya da tur sonunda zil
+  agent-stream --serve               aynı akış telefonda: ev ağı adresi + QR
   agent-stream --errors              yalnız patlayan komutlar
   agent-stream wait                  senden cevap bekleyen oturumlar
   agent-stream sessions              aktif oturumları listele
@@ -1210,6 +1407,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-notes", dest="notes", action="store_false",
                     help="insan satırı, soru, tur sonu gibi komut dışı olayları gizle")
     ap.add_argument("--bell", action="store_true", default=None, help="soru ve tur sonunda terminal zili")
+    ap.add_argument("--serve", action="store_true", default=None,
+                    help="akışı ev ağında tarayıcıya da yayınla; adres ve QR terminale basılır")
+    ap.add_argument("--port", type=int, metavar="N", help="--serve kapısı (varsayılan 7373)")
     ap.add_argument("--json", dest="as_json", action="store_true", help="satır satır JSON (NDJSON) yaz")
     ap.add_argument("--no-color", action="store_true", help="rengi kapat (NO_COLOR da geçerli)")
 
@@ -1226,6 +1426,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_stream.add_argument("--errors", action="store_true")
     p_stream.add_argument("--no-notes", dest="notes", action="store_false")
     p_stream.add_argument("--bell", action="store_true", default=None)
+    p_stream.add_argument("--serve", action="store_true", default=None)
+    p_stream.add_argument("--port", type=int, metavar="N")
     p_stream.add_argument("--json", dest="as_json", action="store_true")
     p_stream.add_argument("--no-color", action="store_true")
 
@@ -1234,6 +1436,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_dash.add_argument("-c", "--columns", dest="lanes", type=int, metavar="N",
                         help="yan yana gösterilecek oturum sayısı")
     p_dash.add_argument("--bell", action="store_true", default=None, help="soru ve tur sonunda terminal zili")
+    p_dash.add_argument("--serve", action="store_true", default=None, help="akışı ev ağında tarayıcıya da yayınla")
+    p_dash.add_argument("--port", type=int, metavar="N", help="--serve kapısı (varsayılan 7373)")
 
     p_wait = subs.add_parser("wait", help="senden cevap bekleyen oturumları listele")
     p_wait.add_argument("-p", "--project", metavar="AD")
@@ -1271,6 +1475,18 @@ def root_of(args) -> Path:
     return Path(getattr(args, "root", None) or DEFAULT_ROOT).expanduser()
 
 
+def make_sink(args, cfg: dict, max_lines: int, show_desc: bool, show_output: bool, max_cmd: int):
+    if not pick(args.serve, cfg, "serve", False):
+        return None
+    port = int(pick(args.port, cfg, "port", WEB_PORT, int))
+    try:
+        sink = WebSink(port, max_lines, show_desc, show_output, max_cmd)
+    except OSError as exc:
+        die(f"{port} kapısı açılamadı ({exc.strerror})", "--port ile başka kapı ver.")
+    sink.announce(err_console)
+    return sink
+
+
 def cmd_stream(args) -> None:
     cfg = merged_config("stream")
     max_lines = int(pick(args.max_lines, cfg, "max_lines", 12, int))
@@ -1290,6 +1506,7 @@ def cmd_stream(args) -> None:
     reader = Reader(root, project, args.session, all_tools, subagents, stale)
     view = StreamView(console, max_lines, args.desc, not args.quiet, max_cmd, bell)
     backfill = int(pick(args.backfill, cfg, "backfill", 0, int))
+    sink = make_sink(args, cfg, max_lines, args.desc, not args.quiet, max_cmd)
 
     if not args.as_json:
         err_console.print(f"[dim]agent-stream {VERSION} · {project or 'tüm projeler'} · "
@@ -1298,6 +1515,8 @@ def cmd_stream(args) -> None:
         events = reader.poll(first=True, backfill=backfill)
         while True:
             for kind, cmd in events:
+                if sink:
+                    sink.feed(kind, cmd)
                 if isinstance(cmd, Note):
                     if kind == "ctx" or not args.notes:
                         continue
@@ -1323,6 +1542,8 @@ def cmd_stream(args) -> None:
             events = reader.poll()
     finally:
         reader.close()
+        if sink:
+            sink.server.shutdown()
 
 
 def cmd_dash(args) -> None:
@@ -1348,6 +1569,7 @@ def cmd_dash(args) -> None:
     lanes: dict[str, Lane] = {}
     recent: list[Cmd] = []
     started, total, drawn = time.time(), 0, 0.0
+    sink = make_sink(args, cfg, 6, True, True, max_cmd)
 
     for kind, ev in reader.poll(first=True):               # kuyruktan durum: kim bekliyor, bağlam
         lane, _ = apply(lanes, kind, ev)
@@ -1363,6 +1585,8 @@ def cmd_dash(args) -> None:
                 changed = False
                 for kind, ev in reader.poll():
                     lane, fresh = apply(lanes, kind, ev)
+                    if sink:
+                        sink.feed(kind, ev)
                     if kind == "start":
                         total += 1
                     elif kind == "end":
@@ -1387,6 +1611,8 @@ def cmd_dash(args) -> None:
                 reader.wait(base if running else 1.0)
     finally:
         reader.close()
+        if sink:
+            sink.server.shutdown()
 
 
 def cmd_sessions(args) -> None:
