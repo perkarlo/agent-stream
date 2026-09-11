@@ -67,8 +67,12 @@ boyama, `»` `?` `■` satırları terminaldekiyle aynı, 56 kolon. Tepede sabit
 300 parçayı da alır. Kaydırıp yukarı çıkınca takip durur, `↓ takip` düğmesi geri döndürür.
 
 Şerit çubuğu sayfada CSS kenarlığıdır, `▌` glyph'i değil: glyph satır kutusunu doldurmuyor,
-çubuk kesik görünüyordu. Tepe şerit haplardan oluşur: sarı `? b7c9 Şema seçimi` soru, beyaz `■ d204 3dk` tur bitti,
+çubuk kesik görünüyordu. Tepe şerit haplardan oluşur: turuncu `? b7c9 Şema seçimi` soru, beyaz `■ d204 3dk` tur bitti,
 yeşil `● e58f myapp` çalışıyor, gri `⟳`/`⧗` döngü ya da arka plan işi.
+
+Sayfanın kimliği mail ajanı raporlarıyla ortak: tepede 4px `#D97757` şerit, yanında ASCII
+maskot, üstünde büyük harf aralıklı `agent-stream` etiketi; soru hapı ve `↓ takip` düğmesi de
+aynı turuncuyu taşır. Akışın kendisi monokai kalır, komut boyaması koyu zemine göre seçildi.
 
 Sunucu yalnız okur, yalnız o rastgele yolu bilene cevap verir, başka her yol 404. Yine de
 transcript'te komut çıktıları ve sunucu adları var: yalnız güvendiğin ağda aç. Kapı `--port`,

@@ -172,6 +172,9 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `Reader._summary` | anahtar sırası + `actions` adları | MCP çağrıları ham JSON olarak düşüyordu; `browser_batch` için adım adları, kalan için yalnız kısa skaler alanlar |
 | `StreamView.note` | `width = max(..., 240)` + fold | `»` ve `■` satırları telefonda 42 karakterde kesiliyordu; sarılınca çubuk devam ediyor, okunur |
 | `Cmd.body` | boş satır elenir | `-n 4` kuyruğunda iki boş satır iki gerçek satırı yiyordu |
+| `WEB_PAGE` | tepe şerit, maskot ve vurgu `#D97757` | Telefon sayfası ile mail ajanı raporları aynı ajanın iki yüzeyi; ortak olan kimlik (4px turuncu şerit, ASCII maskot, büyük harf aralıklı etiket), palet değil. Akış monokai kaldı: komut boyaması ve `LANES` koyu zemine göre seçilmişti, sayfayı raporun açık zeminine taşımak ikisini de değiştirir ve terminalle renk birliğini bozardı (11.09 kullanıcı kararı) |
+| `WEB_PAGE` | maskot `<pre id="m">`, `::before` değil | Durum olayı `b.innerHTML`'i baştan yazıyor; maskot `#b`'nin içinde dursa her karede silinirdi. Sticky `header` ikisini bir arada tutar, `#b` yalnız hap şeridi kalır |
+| `WEB_PAGE` | soluk metin `#9aa3b2` | Raporun gri tonu `#6a7486` açık zemin için seçilmiş, `#2d2e28` üstünde 2,9:1 kalıyor. `#9aa3b2` aynı ailenin bir üstü, koyu zeminde 5,4:1 |
 | `cmd_wait` | `waiting_s` yalnız beklerken | `since` cevap sonrası da duruyor; "boşta" satırında süre yanıltıyordu |
 
 ## Bilinen Sınırlar

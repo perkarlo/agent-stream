@@ -929,26 +929,35 @@ class StreamView:
 
 # ─── Web sunucu ─────────────────────────────────────────────────────────────
 
+# Kimlik mail ajanı raporlarıyla ortak: 4px turuncu şerit, ASCII maskot, #D97757 vurgu.
 WEB_PAGE = """<!doctype html><html lang="tr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>agent-stream</title>
 <style>
 body{margin:0;background:#1e1f1c;color:#f8f8f2;font:12px/1.35 ui-monospace,Menlo,monospace}
-div#b{position:sticky;top:0;background:#2d2e28;border-bottom:1px solid #5a594c;padding:12px 10px;
-   white-space:nowrap;overflow-x:auto;display:flex;gap:8px;align-items:center;font-size:15px}
-div#b::before{content:"agent-stream";color:#75715e;margin-right:6px;font-size:12px}
+header#h{position:sticky;top:0;background:#2d2e28;border-top:4px solid #D97757;
+   border-bottom:1px solid #5a594c;padding:8px 10px;display:flex;gap:10px;align-items:center}
+pre#m{flex:none;margin:0;padding:0;color:#D97757;font-size:10px;line-height:1.15}
+div#t{flex:1;min-width:0;font-family:Arial,Helvetica,sans-serif}
+div#t::before{content:"agent-stream";display:block;font-size:10px;letter-spacing:2px;
+   text-transform:uppercase;color:#D97757;padding-bottom:6px}
+div#b{white-space:nowrap;overflow-x:auto;display:flex;gap:8px;align-items:center;font-size:14px}
 div#b span{padding:5px 12px;border-radius:14px;background:#3e3d32;color:#f8f8f2}
 pre#s div.l{border-left:4px solid;padding-left:5px;margin-left:1px}
-div#b .y{background:#e6db74;color:#272822;font-weight:bold}
-div#b .w{background:#f8f8f2;color:#272822;font-weight:bold}
-div#b .g{color:#a6e22e}#b .d{color:#a5a396}
-div#b:empty::after{content:"oturum yok";color:#75715e}
+div#b .y{background:#D97757;color:#242c3a;font-weight:bold}
+div#b .w{background:#f8f8f2;color:#242c3a;font-weight:bold}
+div#b .g{color:#a6e22e}#b .d{color:#9aa3b2}
+div#b:empty::after{content:"oturum yok";color:#9aa3b2}
 pre{margin:0;padding:6px 8px 40px;white-space:pre;overflow-x:auto}
 pre#s>span{display:block}
-button#f{position:fixed;right:10px;bottom:10px;background:#49483e;color:#f8f8f2;border:0;border-radius:14px;
-   padding:6px 12px;font:inherit;display:none}
+button#f{position:fixed;right:10px;bottom:10px;background:#D97757;color:#242c3a;border:0;border-radius:14px;
+   padding:7px 14px;font:bold 13px Arial,Helvetica,sans-serif;display:none}
 @media (max-width:480px){body{font-size:10.5px}}
-</style></head><body><div id="b"></div><pre id="s"></pre><button id="f">↓ takip</button>
+</style></head><body>
+<header id="h"><pre id="m"> ▐▛███▜▌
+▝▜█████▛▘
+  ▘▘ ▝▝</pre><div id="t"><div id="b"></div></div></header>
+<pre id="s"></pre><button id="f">↓ takip</button>
 <script>
 const s=document.getElementById('s'),b=document.getElementById('b'),f=document.getElementById('f');
 let follow=true;
