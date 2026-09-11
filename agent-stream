@@ -55,7 +55,8 @@ IDLE_STEPS = (0.25, 0.5, 1.0, 2.0)  # yoklama arka ucunun geri çekilme merdiven
 WATCH_CAP = 512                     # izlenecek fd üst sınırı
 TAIL_BYTES = 256 * 1024             # pano ve wait açılışta dosyanın son bu kadarından durum kurar
 CTX_WINDOW = 1_000_000              # bağlam çubuğunun tavanı; ayar dosyasında ctx_window
-MARKS = ('"tool_use"', '"tool_result"', '"kind":"human"', '<command-message>', '"end_turn"',
+MARKS = ('"tool_use"', '"tool_result"', '"kind":"human"', '"kind":"task-notification"',
+         '<command-message>', '"end_turn"',
          '"isCompactSummary":true', '"api_error"', '"compact_boundary"')
 
 THEME = "monokai"                   # komut bloğunun renk teması; --theme ile değişir
@@ -683,6 +684,9 @@ class Reader:
                 if tool == "Monitor" or inp_.get("run_in_background") is True:
                     k = self._note(entry, "ctx").key
                     self.bg[k] = self.bg.get(k, 0) + 1
+                elif tool == "TaskStop":
+                    k = self._note(entry, "ctx").key
+                    self.bg[k] = max(0, self.bg.get(k, 0) - 1)
                 if not self.wanted(tool):
                     continue
                 sub = bool(entry.get("isSidechain")) or bool(entry.get("agentId"))
