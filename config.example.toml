@@ -5,5 +5,11 @@ project = "myapp"   # varsayılan proje filtresi
 max_lines = 8       # komut başına çıktı satırı
 stale = 45          # kaç dakikadır sessiz oturumlar atlanır
 theme = "monokai"   # komut bloğu teması
+bell = false        # soru ve tur sonunda terminal zili (--bell)
+ctx_window = 1000000  # bağlam çubuğunun tavanı, token
 [dash]
 max_cmd = 6         # panoda alt komut bazlı bölüm de var
+[wait]
+stale = 120         # bu süredir sessiz oturumlar listelenmez
+[stats]
+since = "7d"        # 90m · 24h · 30d

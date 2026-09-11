@@ -36,7 +36,7 @@ from rich.console import Console, Group, RenderableType
 from rich.segment import Segment, Segments
 from rich.text import Text
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 HOME = Path.home()
 DEFAULT_ROOT = Path(os.environ.get("AGENT_STREAM_ROOT", HOME / ".claude" / "projects"))
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agent-stream" / "config.toml"
@@ -53,6 +53,10 @@ SAFETY_RESCAN = 5.0                 # yoklamada güvenlik taraması, saniye
 EVENT_RESCAN = 30.0                 # olay arka ucunda: dizin olayı yeni dosyayı zaten söyler
 IDLE_STEPS = (0.25, 0.5, 1.0, 2.0)  # yoklama arka ucunun geri çekilme merdiveni
 WATCH_CAP = 512                     # izlenecek fd üst sınırı
+TAIL_BYTES = 256 * 1024             # pano ve wait açılışta dosyanın son bu kadarından durum kurar
+CTX_WINDOW = 1_000_000              # bağlam çubuğunun tavanı; ayar dosyasında ctx_window
+MARKS = ('"tool_use"', '"tool_result"', '"kind":"human"', '<command-message>', '"end_turn"',
+         '"isCompactSummary":true', '"api_error"', '"compact_boundary"')
 
 THEME = "monokai"                   # komut bloğunun renk teması; --theme ile değişir
 
@@ -64,6 +68,8 @@ GLYPH = {
     "Grep": "⌕", "Glob": "⌕", "WebSearch": "⌕", "WebFetch": "⇣", "Task": "⤷", "Agent": "⤷",
     "Skill": "◇", "SlashCommand": "◇", "Artifact": "▤", "TodoWrite": "☑",
 }
+ASKS = {"AskUserQuestion": "soru", "ExitPlanMode": "plan onayı"}   # kullanıcıyı bekleten araçlar
+NOTE_GLYPH = {"human": "»", "fire": "⟳", "ask": "?", "answer": "↩", "turn": "■", "compact": "⟲", "apierr": "⚠"}
 
 out_console = Console()             # veri → stdout
 err_console = Console(stderr=True)  # banner, uyarı, hata → stderr
@@ -87,7 +93,11 @@ def pretty_project(name: str) -> str:
     home = str(HOME).replace("/", "-")
     if name == home:
         return "~"
-    return name.removeprefix(f"{home}-Documents-").removeprefix(f"{home}-") or "~"
+    name = name.removeprefix(f"{home}-Documents-").removeprefix(f"{home}-") or "~"
+    if "--claude-worktrees-" in name:                      # myapp--claude-worktrees-x-3def31 → myapp⎇x
+        base, wt = name.split("--claude-worktrees-", 1)
+        return f"{base}⎇{wt.rsplit('-', 1)[0]}"
+    return name
 
 
 def pretty_tool(name: str) -> str:
@@ -130,6 +140,46 @@ def parse_ts(iso: str | None) -> datetime:
         return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
     except ValueError:
         return datetime.now()
+
+
+def pretty_model(name: str) -> str:
+    """`claude-opus-5` → `opus 5`; `claude-haiku-4-5-20251001` → `haiku 4.5`."""
+    parts = name.removeprefix("claude-").split("-")
+    fam = parts[0] if parts else name
+    ver = ".".join(x for x in parts[1:] if x.isdigit() and len(x) < 3)
+    return f"{fam} {ver}".strip()
+
+
+def human_tok(n: int) -> str:
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n // 1000}k" if n >= 1000 else str(n)
+
+
+def ctx_bar(tokens: int, window: int, cells: int = 5) -> Text:
+    """`▮▮▮▯▯ 674k`; %80 üstü kırmızı, %60 üstü sarı."""
+    ratio = min(1.0, tokens / max(1, window))
+    full = round(ratio * cells)
+    style = "red" if ratio >= 0.8 else "yellow" if ratio >= 0.6 else "dim"
+    t = Text("▮" * full + "▯" * (cells - full), style=style)
+    t.append(f" {human_tok(tokens)}", style="dim")
+    return t
+
+
+def ring() -> None:
+    """Terminal zili; stdout veri kanalı olduğu için stderr'e yazılır."""
+    try:
+        sys.stderr.write("\a")
+        sys.stderr.flush()
+    except OSError:
+        pass
+
+
+def short_dur(sec: float) -> str:
+    """Bekleme süresi için kısa biçim: `42s` · `3dk` · `1sa 9dk`."""
+    if sec < 60:
+        return f"{sec:.0f}s"
+    if sec < 3600:
+        return f"{int(sec // 60)}dk"
+    return f"{int(sec // 3600)}sa {int(sec % 3600 // 60)}dk"
 
 
 def human_dur(sec: float) -> str:
@@ -315,23 +365,12 @@ def make_watcher() -> PollWatcher:
 
 # ─── Veri katmanı ───────────────────────────────────────────────────────────
 
-@dataclass
-class Cmd:
-    uid: str
+class Keyed:
+    """Oturum + subagent kimliğinden türeyen ortak alanlar; Cmd ve Note paylaşır."""
     sid: str
-    cwd: str
-    branch: str
+    agent: str
+    agent_type: str
     sub: bool
-    tool: str
-    text: str
-    desc: str
-    started: datetime
-    agent: str = ""
-    agent_type: str = ""
-    ended: datetime | None = None
-    out: str = ""
-    err: str = ""
-    ok: bool = True
 
     @property
     def key(self) -> str:
@@ -349,6 +388,49 @@ class Cmd:
     def lane(self) -> str:
         return lane_of(self.key)
 
+
+@dataclass
+class Note(Keyed):
+    """Komut olmayan olay: insan satırı, soru, cevap, tur sonu, özetleme, api hatası, bağlam."""
+    kind: str
+    sid: str
+    cwd: str
+    branch: str
+    sub: bool
+    ts: datetime
+    text: str = ""
+    agent: str = ""
+    agent_type: str = ""
+    extra: dict = field(default_factory=dict)
+
+    def as_json(self) -> dict:
+        return {
+            "event": self.kind,
+            "ts": self.ts.isoformat(timespec="seconds"),
+            "session": self.sid, "agent": self.agent, "agent_type": self.agent_type,
+            "cwd": self.cwd, "branch": self.branch, "subagent": self.sub,
+            "text": self.text, **self.extra,
+        }
+
+
+@dataclass
+class Cmd(Keyed):
+    uid: str
+    sid: str
+    cwd: str
+    branch: str
+    sub: bool
+    tool: str
+    text: str
+    desc: str
+    started: datetime
+    agent: str = ""
+    agent_type: str = ""
+    ended: datetime | None = None
+    out: str = ""
+    err: str = ""
+    ok: bool = True
+
     @property
     def dur(self) -> float:
         end = self.ended or datetime.now(tz=self.started.tzinfo)
@@ -361,6 +443,7 @@ class Cmd:
 
     def as_json(self) -> dict:
         return {
+            "event": "command",
             "ts": self.started.isoformat(timespec="seconds"),
             "session": self.sid,
             "agent": self.agent,
@@ -382,11 +465,15 @@ class Reader:
     """Eşleşen transcript'leri takip eder; ('start'|'end', Cmd) olayları üretir."""
 
     def __init__(self, root: Path, project: str | None, session: str | None,
-                 all_tools: bool, subagents: bool, stale_min: float, watch: bool = True):
+                 all_tools: bool, subagents: bool, stale_min: float, watch: bool = True,
+                 tail: int = 0):
         self.root, self.project, self.session = root, project, session
         self.all_tools, self.subagents, self.stale_min = all_tools, subagents, stale_min
+        self.tail = tail
         self.offsets: dict[str, int] = {}
         self.open: dict[str, Cmd] = {}
+        self.asks: dict[str, Note] = {}
+        self.loops: set[str] = set()                       # ScheduleWakeup çağıran oturumlar
         self.seen_files: set[str] = set()
         self.watcher = make_watcher() if watch else PollWatcher()
         self.rescan = SAFETY_RESCAN if self.watcher.name == "poll" else EVENT_RESCAN
@@ -484,7 +571,81 @@ class Reader:
             text = clean(json.dumps(tur, ensure_ascii=False, indent=1)[:2000])
         return ("", text, False) if block.get("is_error") else (text, "", True)
 
-    def _events(self, entry: dict) -> Iterable[tuple[str, Cmd]]:
+    def _note(self, entry: dict, kind: str, text: str = "", **extra) -> Note:
+        sub = bool(entry.get("isSidechain")) or bool(entry.get("agentId"))
+        return Note(kind=kind, sid=entry.get("sessionId", "????"), cwd=entry.get("cwd", ""),
+                    branch=entry.get("gitBranch", ""), sub=sub, ts=parse_ts(entry.get("timestamp")),
+                    text=text, agent=str(entry.get("agentId", "")),
+                    agent_type=str(entry.get("attributionAgent", "")), extra=extra)
+
+    def _prompt(self, content: str) -> str:
+        """`<command-name>/tur</command-name>` sarmalını `/tur args` biçimine indirir."""
+        m = re.search(r"<command-name>(.*?)</command-name>", content, re.S)
+        if not m:
+            return clean(content).strip()
+        args = re.search(r"<command-args>(.*?)</command-args>", content, re.S)
+        return (m.group(1).strip() + " " + (args.group(1).strip() if args else "")).strip()
+
+    def _side(self, entry: dict) -> Iterable[tuple[str, Note]]:
+        """Komut dışı olaylar: insan satırı, tur sonu, bağlam, özetleme, api hatası."""
+        typ = entry.get("type")
+        msg = entry.get("message") or {}
+        sub = bool(entry.get("isSidechain")) or bool(entry.get("agentId"))
+        if sub and not self.subagents:
+            return
+        if typ == "user":
+            content = msg.get("content")
+            if entry.get("isCompactSummary"):
+                yield "compact", self._note(entry, "compact", "bağlam özetlendi")
+            elif isinstance(content, str) and not entry.get("isMeta"):
+                origin = (entry.get("origin") or {}).get("kind")
+                if origin == "human" or (origin is None and "<command-message>" not in content):
+                    yield "human", self._note(entry, "human", self._prompt(content))
+                elif origin is None:                       # origin'siz slash = /loop ya da cron ateşlemesi
+                    note = self._note(entry, "fire", self._prompt(content))
+                    self.loops.add(note.key)
+                    yield "fire", note
+        elif typ == "assistant":
+            usage = msg.get("usage") or {}
+            tokens = sum(int(usage.get(k) or 0) for k in
+                         ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+            if tokens:
+                yield "ctx", self._note(entry, "ctx", tokens=tokens, model=str(msg.get("model", "")))
+            if msg.get("stop_reason") == "end_turn" and not sub:
+                text = " ".join(b.get("text", "") for b in msg.get("content") or []
+                                if isinstance(b, dict) and b.get("type") == "text")
+                first = next((l for l in clean(text).splitlines() if l.strip()), "")
+                if not first:                              # aynı yanıt birkaç satıra bölünür; metinli olan tek
+                    return
+                key = self._note(entry, "turn").key
+                loop = key in self.loops                   # /loop uyanmayı bekliyor, seni değil
+                self.loops.discard(key)
+                yield "turn", self._note(entry, "turn", first.strip(), loop=loop)
+        elif typ == "system":
+            if entry.get("subtype") == "api_error":
+                err = entry.get("error") or {}
+                yield "apierr", self._note(entry, "apierr", str(err.get("formatted") or err.get("message") or "api hatası"))
+            elif entry.get("subtype") == "compact_boundary":
+                yield "compact", self._note(entry, "compact", "bağlam özetlendi")
+
+    def _ask(self, entry: dict, block: dict) -> Note:
+        inp = block.get("input") or {}
+        qs = inp.get("questions") or []
+        q = qs[0] if qs and isinstance(qs[0], dict) else {}
+        opts = [str(o.get("label", "")) for o in q.get("options") or [] if isinstance(o, dict)]
+        text = str(q.get("header") or ASKS.get(block.get("name", ""), "soru"))
+        return self._note(entry, "ask", text, question=clean(str(q.get("question", ""))),
+                          options=opts, tool=block.get("name", ""))
+
+    def _answer(self, entry: dict, block: dict, ask: Note) -> Note:
+        tur = entry.get("toolUseResult")
+        answers = tur.get("answers") if isinstance(tur, dict) else None
+        text = " · ".join(str(v) for v in answers.values()) if isinstance(answers, dict) and answers \
+            else ("reddedildi" if block.get("is_error") else "cevaplandı")
+        return self._note(entry, "answer", clean(text), header=ask.text, tool=ask.extra.get("tool", ""))
+
+    def _events(self, entry: dict) -> Iterable[tuple[str, Cmd | Note]]:
+        yield from self._side(entry)
         content = (entry.get("message") or {}).get("content")
         if not isinstance(content, list):
             return
@@ -492,8 +653,17 @@ class Reader:
             if not isinstance(block, dict):
                 continue
             kind = block.get("type")
-            if kind == "tool_use":
+            if kind == "tool_use" and block.get("name") in ASKS:
+                note = self._ask(entry, block)
+                self.asks[block.get("id", "")] = note
+                yield "ask", note
+            elif kind == "tool_result" and block.get("tool_use_id", "") in self.asks:
+                ask = self.asks.pop(block.get("tool_use_id", ""))
+                yield "answer", self._answer(entry, block, ask)
+            elif kind == "tool_use":
                 tool = block.get("name", "")
+                if tool in ("ScheduleWakeup", "CronCreate"):
+                    self.loops.add(self._note(entry, "ctx").key)
                 if not self.wanted(tool):
                     continue
                 sub = bool(entry.get("isSidechain")) or bool(entry.get("agentId"))
@@ -520,31 +690,37 @@ class Reader:
                 yield "end", cmd
 
     # -- okuma turu
-    def poll(self, first: bool = False, backfill: int = 0) -> list[tuple[str, Cmd]]:
-        events: list[tuple[str, Cmd]] = []
+    def poll(self, first: bool = False, backfill: int = 0) -> list[tuple[str, Cmd | Note]]:
+        events: list[tuple[str, Cmd | Note]] = []
         fresh_file = False
         for path, st in self.files():
+            mid = False
             if path not in self.seen_files:
                 self.seen_files.add(path)
                 fresh_file = True
                 # Yeni dosya akışa sonundan katılır; geriye dönük okuma yalnız --backfill ile.
                 self.offsets[path] = 0 if (first and backfill) else st.st_size
+                if first and self.tail:                    # durum kurmak için yalnız kuyruk
+                    self.offsets[path] = max(0, st.st_size - self.tail)
+                    mid = self.offsets[path] > 0
             if st.st_size < self.offsets[path]:            # kırpılmış / döndürülmüş
                 self.offsets[path] = 0
             if st.st_size == self.offsets[path]:
                 continue
             try:
-                with open(path, "r", errors="replace") as fh:
+                with open(path, "rb") as fh:
                     fh.seek(self.offsets[path])
-                    data = fh.read()
+                    raw = fh.read()
                     self.offsets[path] = fh.tell()
             except OSError:
                 continue
-            lines = data.splitlines()
+            if mid:                                        # kuyruğun ilk satırı yarım, atılır
+                raw = raw.split(b"\n", 1)[1] if b"\n" in raw else b""
+            lines = raw.decode("utf-8", errors="replace").splitlines()
             if first and backfill:
                 lines = lines[-backfill * 6:]
             for line in lines:
-                if '"tool_use"' not in line and '"tool_result"' not in line:
+                if not any(m in line for m in MARKS):
                     continue
                 try:
                     entry = json.loads(line)
@@ -556,7 +732,7 @@ class Reader:
         if first and backfill:
             starts = [e for e in events if e[0] == "start"]
             keep = {c.uid for _, c in starts[-backfill:]}
-            events = [(k, c) for k, c in events if c.uid in keep]
+            events = [(k, c) for k, c in events if isinstance(c, Note) or c.uid in keep]
         self._idle = 0 if events else min(self._idle + 1, len(IDLE_STEPS) - 1)
         return events
 
@@ -623,10 +799,49 @@ def status_text(cmd: Cmd, prefix: str = "") -> Text:
 
 class StreamView:
     def __init__(self, console: Console, max_lines: int, show_desc: bool, show_output: bool,
-                 max_cmd: int = 6):
+                 max_cmd: int = 6, bell: bool = False):
         self.c, self.max_lines, self.show_desc, self.show_output = console, max_lines, show_desc, show_output
-        self.max_cmd = max_cmd
+        self.max_cmd, self.bell = max_cmd, bell
         self.last_uid = ""
+
+    def note(self, n: Note) -> None:
+        """Komut dışı olay tek satır; soru seçenekleriyle, tur sonu ilk cümlesiyle düşer."""
+        g = NOTE_GLYPH.get(n.kind, "·")
+        head = Text(n.ts.strftime("%H:%M:%S "), style="dim")
+        head.append(n.tag, style=f"bold {n.lane}")
+        width = self.c.width - 14
+        if n.kind == "human":
+            head.append("  " + clip(n.text.replace("\n", " ⏎ "), width), style="bold")
+        elif n.kind == "fire":
+            head.append("  " + clip(n.text, width) + "  · döngü uyandı", style="dim")
+        elif n.kind == "ask":
+            head.append(f"  {n.text}", style="bold yellow")
+            head.append("  · seni bekliyor", style="yellow")
+        elif n.kind == "answer":
+            head.append(f"  {n.extra.get('header', '')}: ", style="dim")
+            head.append(clip(n.text, width), style="italic")
+        elif n.kind == "turn":
+            head.append("  döngü, sıradaki uyanışı bekliyor" if n.extra.get("loop") else "  tur bitti",
+                        style="dim" if n.extra.get("loop") else "bold")
+            if n.text:
+                head.append(f"  · {clip(n.text, width)}", style="dim italic")
+        elif n.kind == "compact":
+            head.append(f"  {n.text}", style="magenta")
+        elif n.kind == "apierr":
+            head.append(f"  {clip(n.text, width)}", style="red")
+        else:
+            return
+        self.c.print()
+        lane_print(self.c, n.lane, head, g)
+        if n.kind == "ask":
+            q = clip(n.extra.get("question", "").replace("\n", " "), width)
+            if q:
+                lane_print(self.c, n.lane, Text(q, style="italic"))
+            for o in n.extra.get("options", [])[:6]:
+                lane_print(self.c, n.lane, Text(f"○ {clip(o, width - 2)}", style="yellow"))
+        if self.bell and (n.kind == "ask" or (n.kind == "turn" and not n.extra.get("loop"))):
+            ring()
+        self.c.file.flush()
 
     def start(self, cmd: Cmd) -> None:
         self.c.print()
@@ -642,12 +857,14 @@ class StreamView:
             anchor.append(clip(cmd.text.replace("\n", " ⏎ "), self.c.width - 8), style="dim italic")
             lane_print(self.c, cmd.lane, anchor)
         self.last_uid = ""
-        if self.show_output:
+        # -q çıktıyı gizler ama patlayan komutun nedeni görünmeli: hatada 3 satır.
+        limit = self.max_lines if self.show_output else (3 if not cmd.ok else 0)
+        if limit:
             lines = cmd.body
-            for text, is_err in lines[: self.max_lines]:
+            for text, is_err in lines[:limit]:
                 body = Text(clip(text, self.c.width - 6), style="red" if is_err else "dim")
                 lane_print(self.c, cmd.lane, body)
-            rest = len(lines) - self.max_lines
+            rest = len(lines) - limit
             if rest > 0:
                 lane_print(self.c, cmd.lane, Text(f"… +{rest} satır", style="dim italic"))
         lane_print(self.c, cmd.lane, status_text(cmd, "└ "))
@@ -663,10 +880,58 @@ class Lane:
     label: str = ""
     cwd: str = ""
     branch: str = ""
+    sub: bool = False
     running: Cmd | None = None
     last: Cmd | None = None
     count: int = 0
     seen: float = field(default_factory=time.time)
+    waiting: str = ""                 # "" · "ask" · "turn"
+    ask: Note | None = None
+    turn: str = ""                    # tur sonundaki ilk cümle
+    prompt: str = ""                  # son insan satırı
+    since: datetime | None = None     # bekleme başlangıcı
+    ctx: int = 0
+    model: str = ""
+    warn: str = ""
+    loop: bool = False                # son tur ScheduleWakeup ile bitti: döngü
+
+    @property
+    def order(self) -> tuple:
+        """Sıra: soru bekleyen · tur bitmiş · çalışan/son görülen."""
+        return ({"ask": 0, "turn": 1}.get(self.waiting, 2), -self.seen)
+
+
+def apply(lanes: dict[str, Lane], kind: str, ev: Cmd | Note) -> tuple[Lane, bool]:
+    """Bir olayı şerit durumuna işler; (şerit, yeni bekleme başladı mı) döner."""
+    lane = lanes.setdefault(ev.key, Lane(ev.key))
+    lane.tag, lane.label, lane.sub, lane.seen = ev.tag, ev.label, ev.sub, time.time()
+    if ev.cwd:
+        lane.cwd, lane.branch = ev.cwd, ev.branch
+    fresh = False
+    if kind == "start":
+        lane.running, lane.waiting, lane.ask, lane.warn = ev, "", None, ""
+    elif kind == "end":
+        lane.running, lane.last, lane.count = None, ev, lane.count + 1
+    elif kind == "human":
+        lane.prompt, lane.waiting, lane.ask, lane.turn, lane.warn = ev.text, "", None, "", ""
+        lane.loop = False
+    elif kind == "fire":
+        lane.prompt, lane.waiting, lane.ask, lane.loop = ev.text, "", None, True
+    elif kind == "ask":
+        lane.waiting, lane.ask, lane.since, fresh = "ask", ev, ev.ts, True
+    elif kind == "answer":
+        lane.waiting, lane.ask = "", None
+    elif kind == "turn":
+        if ev.extra.get("loop"):
+            lane.waiting, lane.turn, lane.loop = "", ev.text, True
+        elif lane.waiting != "ask":
+            fresh = lane.waiting != "turn"
+            lane.waiting, lane.turn, lane.since, lane.loop = "turn", ev.text, ev.ts, False
+    elif kind == "ctx":
+        lane.ctx, lane.model = int(ev.extra.get("tokens", 0)), str(ev.extra.get("model", ""))
+    elif kind == "apierr":
+        lane.warn = ev.text
+    return lane, fresh
 
 
 def lane_parts(lane: Lane, width: int, max_cmd: int) -> tuple[list[RenderableType], list[Text], int]:
@@ -679,8 +944,28 @@ def lane_parts(lane: Lane, width: int, max_cmd: int) -> tuple[list[RenderableTyp
     head: list[RenderableType] = []
     used = 0
 
+    if lane.waiting == "ask" and lane.ask:                 # soru komutun önüne geçer
+        q = clip(lane.ask.extra.get("question", "").replace("\n", " "), inner * 2)
+        head.append(Text(q, style="italic"))
+        used += -(-cell_len(q) // inner) or 1
+        for o in lane.ask.extra.get("options", [])[:6]:
+            head.append(Text(f"○ {clip(o, inner - 2)}", style="yellow"))
+            used += 1
+        return head, [], used
+    if lane.waiting == "turn":
+        head.append(Text("■ tur bitti · seni bekliyor", style="bold"))
+        used += 1
+        if lane.turn:
+            head.append(Text(clip(lane.turn, inner * 2), style="dim italic"))
+            used += -(-cell_len(clip(lane.turn, inner * 2)) // inner) or 1
+        if lane.prompt:
+            head.append(Text(clip(f"» {lane.prompt}", inner), style="dim"))
+            used += 1
+    if lane.warn:
+        head.append(Text(clip(f"⚠ {lane.warn}", inner), style="red"))
+        used += 1
     if not cmd:
-        return [Text("bekliyor…", style="dim italic")], [], 1
+        return head + [Text("bekliyor…", style="dim italic")], [], used + 1
 
     # Komut şeritte de satır satır durur; heredoc tek satıra sıkıştırılınca okunmuyordu.
     rows = [clip(l, inner * 2) for l in (cmd.text.splitlines() or [""])[:max_cmd]]
@@ -705,7 +990,8 @@ def lane_need(parts: tuple[list, list, int]) -> int:
     return used + len(tail) + 3                            # boş satır + iki kenarlık
 
 
-def lane_panel(lane: Lane, height: int, width: int, parts: tuple[list, list, int]):
+def lane_panel(lane: Lane, height: int, width: int, parts: tuple[list, list, int],
+               ctx_window: int = CTX_WINDOW):
     from rich.panel import Panel
     head, tail, used = parts
     room = max(1, height - 3 - used)
@@ -718,21 +1004,34 @@ def lane_panel(lane: Lane, height: int, width: int, parts: tuple[list, list, int
         title.append(f" · {lane.branch}", style="dim")
     if lane.label:
         title.append(lane.label, style="dim italic")
+    if lane.waiting == "ask" and lane.ask:
+        title.append(f"  ? {lane.ask.text}", style="bold yellow")
+    elif lane.waiting == "turn":
+        title.append("  ■", style="bold")
+    sub = Text()
+    if lane.ctx:
+        sub.append_text(ctx_bar(lane.ctx, ctx_window))
+    if not lane.running and lane.last:
+        sub.append("  " if lane.ctx else "")
+        sub.append_text(status_text(lane.last))
+    if lane.waiting and lane.since:
+        wait = (datetime.now(tz=lane.since.tzinfo) - lane.since).total_seconds()
+        sub.append(f"  ⧗ {short_dur(wait)}", style="yellow" if lane.waiting == "ask" else "dim")
+    border = "yellow" if lane.waiting == "ask" else color if lane.running else "dim"
     return Panel(
         body, title=title, title_align="left",
-        subtitle=None if lane.running else (status_text(lane.last) if lane.last else None),
-        subtitle_align="right",
-        border_style=color if lane.running else "dim",
-        height=height, width=width, padding=(0, 1),
+        subtitle=sub if sub.plain else None, subtitle_align="right",
+        border_style=border, height=height, width=width, padding=(0, 1),
     )
 
 
 def dash_frame(lanes: dict[str, Lane], recent: list[Cmd], started: float,
-               total: int, console: Console, cols: int, max_cmd: int = 4) -> RenderableType:
+               total: int, console: Console, cols: int, max_cmd: int = 4,
+               ctx_window: int = CTX_WINDOW) -> RenderableType:
     from rich.columns import Columns
     from rich.panel import Panel
     from rich.table import Table
-    active = sorted(lanes.values(), key=lambda l: -l.seen)
+    active = sorted(lanes.values(), key=lambda l: l.order)   # bekleyen öne: pano bir kuyruk
     shown, hidden = active[:cols], max(0, len(active) - cols)
 
     header = Table.grid(expand=True)
@@ -740,6 +1039,12 @@ def dash_frame(lanes: dict[str, Lane], recent: list[Cmd], started: float,
     header.add_column(justify="right")
     left = Text("agent-stream", style="bold")
     left.append("  pano", style="dim")
+    asks = sum(1 for l in active if l.waiting == "ask")
+    turns = sum(1 for l in active if l.waiting == "turn")
+    if asks:
+        left.append(f"   ? {asks} soru", style="bold yellow")
+    if turns:
+        left.append(f"   ■ {turns} tur bitti", style="bold")
     right = Text(f"{len(active)} şerit", style="bold")
     if hidden:
         right.append(f" (+{hidden} gizli)", style="dim")
@@ -750,7 +1055,7 @@ def dash_frame(lanes: dict[str, Lane], recent: list[Cmd], started: float,
     width = max(26, console.width // max(1, len(shown) or 1) - 1)
     parts = [lane_parts(l, width, max_cmd) for l in shown]
     height = min(room, max([9] + [lane_need(pt) for pt in parts])) if shown else room
-    body = Columns([lane_panel(l, height, width, pt) for l, pt in zip(shown, parts)],
+    body = Columns([lane_panel(l, height, width, pt, ctx_window) for l, pt in zip(shown, parts)],
                    equal=True, expand=True) \
         if shown else Panel(Text("aktif oturum yok — Claude Code'da bir komut çalıştır", style="dim italic"),
                             border_style="dim", height=height)
@@ -829,9 +1134,13 @@ EXAMPLES = """\
   agent-stream -p myapp -n 6         sadece myapp, komut başına 6 satır çıktı
   agent-stream --pair -q             komutu çıktısıyla birlikte, sade
   agent-stream dash                  paralel oturumlar için canlı pano
+  agent-stream -q --bell             sade akış; soru ya da tur sonunda zil
+  agent-stream --errors              yalnız patlayan komutlar
+  agent-stream wait                  senden cevap bekleyen oturumlar
   agent-stream sessions              aktif oturumları listele
   agent-stream replay a3d1           geçmiş bir oturumu baştan oynat
-  agent-stream --json | jq -r .command    akışı makineye ver
+  agent-stream stats --since 24h     oturum, komut, hata, model, saat dağılımı
+  agent-stream --json | jq -r '.command // empty'    akışı makineye ver
 
 Ayar dosyası: ~/.config/agent-stream/config.toml  ·  ortam: AGENT_STREAM_PROJECT,
 AGENT_STREAM_ROOT, AGENT_STREAM_THEME, AGENT_STREAM_WATCH (auto|kqueue|inotify|poll)
@@ -871,6 +1180,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-b", "--backfill", type=int, metavar="N", help="açılışta son N komutu da göster")
     ap.add_argument("--pair", action="store_true", help="komutu çıktısıyla birlikte, bittiğinde yaz")
     ap.add_argument("--no-desc", dest="desc", action="store_false", help="komut açıklamasını gizle")
+    ap.add_argument("--errors", action="store_true", help="yalnız hata veren komutlar")
+    ap.add_argument("--no-notes", dest="notes", action="store_false",
+                    help="insan satırı, soru, tur sonu gibi komut dışı olayları gizle")
+    ap.add_argument("--bell", action="store_true", default=None, help="soru ve tur sonunda terminal zili")
     ap.add_argument("--json", dest="as_json", action="store_true", help="satır satır JSON (NDJSON) yaz")
     ap.add_argument("--no-color", action="store_true", help="rengi kapat (NO_COLOR da geçerli)")
 
@@ -884,6 +1197,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_stream.add_argument("-b", "--backfill", type=int, metavar="N")
     p_stream.add_argument("--pair", action="store_true")
     p_stream.add_argument("--no-desc", dest="desc", action="store_false")
+    p_stream.add_argument("--errors", action="store_true")
+    p_stream.add_argument("--no-notes", dest="notes", action="store_false")
+    p_stream.add_argument("--bell", action="store_true", default=None)
     p_stream.add_argument("--json", dest="as_json", action="store_true")
     p_stream.add_argument("--no-color", action="store_true")
 
@@ -891,6 +1207,21 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(p_dash, dash=True)
     p_dash.add_argument("-c", "--columns", dest="lanes", type=int, metavar="N",
                         help="yan yana gösterilecek oturum sayısı")
+    p_dash.add_argument("--bell", action="store_true", default=None, help="soru ve tur sonunda terminal zili")
+
+    p_wait = subs.add_parser("wait", help="senden cevap bekleyen oturumları listele")
+    p_wait.add_argument("-p", "--project", metavar="AD")
+    p_wait.add_argument("--stale", type=float, metavar="DK", default=None,
+                        help="bu süredir sessiz oturumlar atlanır (varsayılan 120)")
+    p_wait.add_argument("--all", dest="all_", action="store_true", help="beklemeyenleri de göster")
+    p_wait.add_argument("--json", dest="as_json", action="store_true")
+    p_wait.add_argument("--root", metavar="DİZİN")
+
+    p_stats = subs.add_parser("stats", help="oturum, komut, hata, model ve saat dağılımı")
+    p_stats.add_argument("-p", "--project", metavar="AD")
+    p_stats.add_argument("--since", metavar="SÜRE", default=None, help="24h · 7d · 30d (varsayılan 7d)")
+    p_stats.add_argument("--json", dest="as_json", action="store_true")
+    p_stats.add_argument("--root", metavar="DİZİN")
 
     p_ses = subs.add_parser("sessions", help="aktif oturumları etiketleriyle listele")
     p_ses.add_argument("--stale", type=float, metavar="DK", default=60)
@@ -929,8 +1260,9 @@ def cmd_stream(args) -> None:
         die(f"{root} yok", "Claude Code bu makinede hiç çalışmamış olabilir; --root ile başka bir kök verebilirsin.")
 
     console = setup_console(args.no_color)
+    bell = bool(pick(args.bell, cfg, "bell", False))
     reader = Reader(root, project, args.session, all_tools, subagents, stale)
-    view = StreamView(console, max_lines, args.desc, not args.quiet, max_cmd)
+    view = StreamView(console, max_lines, args.desc, not args.quiet, max_cmd, bell)
     backfill = int(pick(args.backfill, cfg, "backfill", 0, int))
 
     if not args.as_json:
@@ -940,12 +1272,23 @@ def cmd_stream(args) -> None:
         events = reader.poll(first=True, backfill=backfill)
         while True:
             for kind, cmd in events:
-                if args.as_json:
-                    if kind == "end":
+                if isinstance(cmd, Note):
+                    if kind == "ctx" or not args.notes:
+                        continue
+                    if args.as_json:
+                        print(json.dumps(cmd.as_json(), ensure_ascii=False), flush=True)
+                    else:
+                        view.note(cmd)
+                elif args.as_json:
+                    if kind == "end" and (cmd.ok is False or not args.errors):
                         print(json.dumps(cmd.as_json(), ensure_ascii=False), flush=True)
                 elif kind == "start":
-                    if not args.pair:
+                    if not args.pair and not args.errors:
                         view.start(cmd)
+                elif args.errors:
+                    if not cmd.ok:                          # yalnız patlayanlar, eşli
+                        view.start(cmd)
+                        view.end(cmd)
                 else:
                     if args.pair:
                         view.start(cmd)
@@ -965,6 +1308,8 @@ def cmd_dash(args) -> None:
     base = float(pick(args.interval, cfg, "interval", 0.25, float))
     project = pick(args.project, cfg, "project", None)
     all_tools = pick(args.all_tools, cfg, "all_tools", True)
+    bell = bool(pick(args.bell, cfg, "bell", False))
+    ctx_window = int(pick(None, cfg, "ctx_window", CTX_WINDOW, int))
     set_theme(str(pick(args.theme, cfg, "theme", "monokai")))
     root = root_of(args)
     if not root.is_dir():
@@ -973,37 +1318,44 @@ def cmd_dash(args) -> None:
     if not console.is_terminal:
         die("pano bir terminal gerektirir", "boru hattında `agent-stream --json` kullan.", EXIT_USAGE)
 
-    reader = Reader(root, project, args.session, all_tools, True, stale)
+    reader = Reader(root, project, args.session, all_tools, True, stale, tail=TAIL_BYTES)
     lanes: dict[str, Lane] = {}
     recent: list[Cmd] = []
     started, total, drawn = time.time(), 0, 0.0
 
-    reader.poll(first=True)
+    for kind, ev in reader.poll(first=True):               # kuyruktan durum: kim bekliyor, bağlam
+        lane, _ = apply(lanes, kind, ev)
+        if isinstance(ev, Cmd):
+            lane.seen = ev.started.timestamp()
+    for lane in lanes.values():
+        if lane.running and not lane.waiting:              # açılışta yarım kalan komut koşuyor sayılmaz
+            lane.last, lane.running = lane.running, None
     try:
         # Kare yalnız durum değişince üretilir; koşan komut varken spinner için 4 fps.
         with Live(console=console, screen=True, auto_refresh=False, transient=True) as live:
             while True:
                 changed = False
-                for kind, cmd in reader.poll():
-                    lane = lanes.setdefault(cmd.key, Lane(cmd.key))
-                    lane.tag, lane.label = cmd.tag, cmd.label
-                    lane.cwd, lane.branch, lane.seen = cmd.cwd, cmd.branch, time.time()
+                for kind, ev in reader.poll():
+                    lane, fresh = apply(lanes, kind, ev)
                     if kind == "start":
-                        lane.running, total, changed = cmd, total + 1, True
-                    else:
-                        lane.running, lane.last, lane.count = None, cmd, lane.count + 1
-                        recent.append(cmd)
+                        total += 1
+                    elif kind == "end":
+                        recent.append(ev)
                         recent[:] = recent[-20:]
-                        changed = True
+                    if fresh and bell:
+                        ring()
+                    changed = changed or kind != "ctx"
                 cutoff = time.time() - stale * 60
-                for key in [k for k, l in lanes.items() if l.seen < cutoff]:
+                # Bekleyen şerit dört kat daha uzun kalır: soru kaçmasın, kapanmış oturum da sonsuza dek durmasın.
+                for key in [k for k, l in lanes.items()
+                            if l.seen < (cutoff - 3 * stale * 60 if l.waiting else cutoff)]:
                     del lanes[key]
                     changed = True
 
                 running = any(l.running for l in lanes.values())
                 now = time.time()
                 if changed or (running and now - drawn >= 0.25) or now - drawn >= 5.0:
-                    live.update(dash_frame(lanes, recent, started, total, console, cols, max_cmd),
+                    live.update(dash_frame(lanes, recent, started, total, console, cols, max_cmd, ctx_window),
                                 refresh=True)
                     drawn = now
                 reader.wait(base if running else 1.0)
@@ -1053,6 +1405,197 @@ def cmd_sessions(args) -> None:
     out_console.print(table)
 
 
+def seed_lanes(root: Path, project: str | None, stale: float) -> dict[str, Lane]:
+    """Aktif oturumların kuyruğundan şerit durumu kurar; canlı takip etmez."""
+    reader = Reader(root, project, None, True, False, stale, watch=False, tail=TAIL_BYTES)
+    lanes: dict[str, Lane] = {}
+    for kind, ev in reader.poll(first=True):
+        lane, _ = apply(lanes, kind, ev)
+        lane.seen = (ev.started if isinstance(ev, Cmd) else ev.ts).timestamp()
+    reader.close()
+    return lanes
+
+
+def cmd_wait(args) -> None:
+    from rich.table import Table
+    cfg = merged_config("wait")
+    stale = float(pick(args.stale, cfg, "stale", 120, float))
+    project = pick(args.project, cfg, "project", None)
+    ctx_window = int(pick(None, cfg, "ctx_window", CTX_WINDOW, int))
+    root = root_of(args)
+    if not root.is_dir():
+        die(f"{root} yok")
+    lanes = sorted(seed_lanes(root, project, stale).values(), key=lambda l: l.order)
+    if not args.all_:
+        lanes = [l for l in lanes if l.waiting]
+    now = datetime.now().astimezone()
+    rows = []
+    for l in lanes:
+        wait = (now - l.since).total_seconds() if l.since else 0.0
+        rows.append({
+            "session": l.key.split("#")[0], "tag": l.tag, "project": os.path.basename(l.cwd) or "~",
+            "branch": l.branch, "state": l.waiting or ("running" if l.running else "loop" if l.loop else "idle"),
+            "header": l.ask.text if l.ask else "",
+            "question": l.ask.extra.get("question", "") if l.ask else "",
+            "options": l.ask.extra.get("options", []) if l.ask else [],
+            "turn": l.turn, "prompt": l.prompt, "waiting_s": round(wait) if l.waiting else 0,
+            "ctx_tokens": l.ctx, "model": l.model,
+        })
+    if args.as_json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2), flush=True)
+        return
+    if not rows:
+        err_console.print("[dim]seni bekleyen oturum yok[/]")
+        return
+    table = Table(box=None, pad_edge=False, header_style="dim", expand=True)
+    for col, w in (("etiket", 6), ("proje", 14), ("durum", 18), ("süre", 7), ("bağlam", 11), ("model", 9)):
+        table.add_column(col, min_width=w, justify="right" if col in ("süre", "bağlam") else "left",
+                         overflow="ellipsis", no_wrap=True)
+    table.add_column("son satır", ratio=1, overflow="ellipsis", no_wrap=True)
+    for l, r in zip(lanes, rows):
+        if r["state"] == "ask":
+            state = Text(f"? {r['header']}", style="bold yellow")
+            last = " / ".join(r["options"][:4])
+        elif r["state"] == "turn":
+            state = Text("■ tur bitti", style="bold")
+            last = r["turn"]
+        elif r["state"] == "running":
+            state, last = Text("● çalışıyor", style="green"), (l.running.text if l.running else "")
+        elif l.loop:
+            state, last = Text("⟳ döngü", style="dim"), r["turn"]
+        else:
+            state, last = Text("· boşta", style="dim"), r["turn"]
+        table.add_row(
+            Text(r["tag"], style=f"bold {lane_of(l.key)}"),
+            r["project"] + (f" · {r['branch']}" if r["branch"] and r["branch"] != "HEAD" else ""),
+            state, short_dur(r["waiting_s"]) if r["waiting_s"] else "",
+            ctx_bar(r["ctx_tokens"], ctx_window) if r["ctx_tokens"] else Text(""),
+            pretty_model(r["model"]) if r["model"] else "",
+            Text(clip(last.replace("\n", " "), 60), style="dim"),
+        )
+    out_console.print(table)
+
+
+def parse_since(text: str) -> float:
+    """`24h` · `7d` · `90m` → saniye."""
+    m = re.fullmatch(r"(\d+)([mhd])", text.strip())
+    if not m:
+        die(f"anlaşılmayan süre: {text}", "örnek: 90m · 24h · 7d", EXIT_USAGE)
+    return int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2)]
+
+
+def cmd_stats(args) -> None:
+    from rich.table import Table
+    cfg = merged_config("stats")
+    since = parse_since(str(pick(args.since, cfg, "since", "7d")))
+    project = pick(args.project, cfg, "project", None)
+    root = root_of(args)
+    if not root.is_dir():
+        die(f"{root} yok")
+    cutoff = time.time() - since
+    files = [p for p in glob.glob(str(root / "**" / "*.jsonl"), recursive=True)
+             if (not project or project.lower() in p.lower()) and os.stat(p).st_mtime >= cutoff]
+    tools: dict[str, int] = {}
+    models: dict[str, int] = {}
+    projects: dict[str, int] = {}
+    hours = [0] * 24
+    sessions: set[str] = set()
+    n_cmd = n_err = n_human = n_ask = n_turn = n_compact = n_apierr = out_tok = 0
+    open_ids: dict[str, str] = {}
+    for path in files:
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        sid = os.path.basename(path)[:-6]
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            if not any(m in line for m in MARKS):
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = parse_ts(e.get("timestamp"))
+            if ts.timestamp() < cutoff:
+                continue
+            typ, msg = e.get("type"), e.get("message") or {}
+            content = msg.get("content")
+            if typ == "assistant":
+                models[str(msg.get("model", "?"))] = models.get(str(msg.get("model", "?")), 0) + 1
+                out_tok += int((msg.get("usage") or {}).get("output_tokens") or 0)
+                if msg.get("stop_reason") == "end_turn" and not (e.get("isSidechain") or e.get("agentId")):
+                    n_turn += 1
+            elif typ == "user":
+                origin = (e.get("origin") or {}).get("kind")
+                if isinstance(content, str) and not e.get("isMeta") and \
+                        (origin == "human" or (origin is None and "<command-message>" not in content)):
+                    n_human += 1
+                    sessions.add(sid)
+                if e.get("isCompactSummary"):
+                    n_compact += 1
+            elif typ == "system":
+                n_apierr += e.get("subtype") == "api_error"
+                n_compact += e.get("subtype") == "compact_boundary"
+            if not isinstance(content, list):
+                continue
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "tool_use":
+                    name = b.get("name", "")
+                    if name in ASKS:
+                        n_ask += 1
+                        continue
+                    if name == "TodoWrite":
+                        continue
+                    n_cmd += 1
+                    hours[ts.hour] += 1
+                    tools[name] = tools.get(name, 0) + 1
+                    proj = pretty_project(os.path.relpath(path, root).split(os.sep)[0])
+                    projects[proj] = projects.get(proj, 0) + 1
+                    open_ids[b.get("id", "")] = name
+                elif b.get("type") == "tool_result" and b.get("tool_use_id") in open_ids:
+                    open_ids.pop(b.get("tool_use_id"))
+                    n_err += bool(b.get("is_error"))
+    night = sum(hours[0:6])
+    summary = {
+        "since": str(args.since or cfg.get("since", "7d")), "files": len(files),
+        "sessions_with_prompts": len(sessions), "prompts": n_human, "commands": n_cmd,
+        "errors": n_err, "asks": n_ask, "turns": n_turn, "compactions": n_compact,
+        "api_errors": n_apierr, "output_tokens": out_tok,
+        "night_share": round(night / n_cmd, 3) if n_cmd else 0.0,
+        "tools": dict(sorted(tools.items(), key=lambda kv: -kv[1])),
+        "models": dict(sorted(models.items(), key=lambda kv: -kv[1])),
+        "projects": dict(sorted(projects.items(), key=lambda kv: -kv[1])),
+        "hours": hours,
+    }
+    if args.as_json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
+        return
+    if not n_cmd:
+        err_console.print(f"[dim]son {summary['since']} içinde komut yok[/]")
+        return
+    peak = max(hours) or 1
+    bars = "".join("▁▂▃▄▅▆▇█"[min(7, round(h / peak * 7))] if h else " " for h in hours)
+    t = Table(box=None, pad_edge=False, show_header=False)
+    t.add_column(style="dim", justify="right")
+    t.add_column()
+    t.add_row("pencere", f"son {summary['since']} · {len(files)} transcript")
+    t.add_row("oturum", f"{len(sessions)} (senin yazdığın) · {n_human} istek · {n_ask} soru · {n_turn} tur")
+    err_style = "red" if n_err else "green"
+    t.add_row("komut", Text.assemble(f"{n_cmd} · ", (f"{n_err} hata", err_style),
+                                     f" · {n_compact} özetleme · {n_apierr} api hatası", style=""))
+    t.add_row("araç", " · ".join(f"{glyph_of(k)} {pretty_tool(k)} {v}".replace("· ", "")
+                                 for k, v in list(summary["tools"].items())[:7]))
+    t.add_row("model", " · ".join(f"{pretty_model(k)} {v}" for k, v in summary["models"].items())
+              + f"  ·  {human_tok(out_tok)} çıktı token")
+    t.add_row("proje", " · ".join(f"{k} {v}" for k, v in list(summary["projects"].items())[:6]))
+    t.add_row("saat", Text.assemble(("00 ", "dim"), bars, (" 23", "dim"),
+                                    (f"   gece 00-06: %{night * 100 / n_cmd:.0f}", "dim")))
+    out_console.print(t)
+
+
 def cmd_replay(args) -> None:
     cfg = merged_config("replay")
     max_lines = int(pick(args.max_lines, cfg, "max_lines", 6, int))
@@ -1078,14 +1621,18 @@ def cmd_replay(args) -> None:
     reader._need_scan = False
     view = StreamView(console, max_lines, True, True, max_cmd)
     for kind, cmd in reader.poll():
-        if kind == "end":          # oynatma canlı değil: komut çıktısıyla bitişik kalsın
+        if isinstance(cmd, Note):
+            if kind != "ctx":
+                view.note(cmd)
+        elif kind == "end":        # oynatma canlı değil: komut çıktısıyla bitişik kalsın
             view.start(cmd)
             view.end(cmd)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    {"dash": cmd_dash, "sessions": cmd_sessions, "replay": cmd_replay}.get(
+    {"dash": cmd_dash, "sessions": cmd_sessions, "replay": cmd_replay,
+     "wait": cmd_wait, "stats": cmd_stats}.get(
         getattr(args, "cmd", None) or "stream", cmd_stream)(args)
 
 

@@ -7,6 +7,7 @@ Hook yok, sarmalayıcı yok, oturuma dokunmuyor: salt okunur bir takipçi.
 ```bash
 astream                       # tüm aktif oturumların komut akışı
 asdash                        # paralel oturumlar için canlı pano
+astream wait                  # senden cevap bekleyen oturumlar
 ```
 
 ## Görünümler
@@ -16,8 +17,33 @@ asdash                        # paralel oturumlar için canlı pano
 | `astream` | komut çalıştığı an başlığıyla düşer, çıktısı bitince altına eklenir |
 | `astream --pair` | komutu çıktısıyla birlikte, bittiğinde tek blok halinde yazar |
 | `astream dash` | oturumları yan yana şeritlerde gösterir; çalışan komutta spinner, altta son 5 komut. Komut ilk 4 satırıyla durur (`-m`) |
+| `astream wait` | senden cevap bekleyen oturumlar: açık soru, seçenekleri, tur sonu, bekleme süresi, bağlam, model. `--all` çalışan ve döngüdekileri de gösterir |
 | `astream sessions` | aktif oturumlar: etiket, proje, boşta kalma süresi |
 | `astream replay a3d1` | geçmiş bir oturumun tüm komutlarını baştan yazar |
+| `astream stats` | son 7 günün özeti: oturum, istek, soru, komut, hata, araç ve model dağılımı, saat histogramı, gece payı. `--since 24h` |
+
+## Oturumlar sana gelir
+
+Akış yalnız komutları değil, oturumun senden ne beklediğini de yazar. Komut dışı olaylar
+tek satırdır, işareti şerit çubuğuna biner:
+
+| işaret | olay | kaynak |
+| --- | --- | --- |
+| `»` | senin yazdığın istek | `origin.kind == human` |
+| `?` | soru soruldu, seni bekliyor; altında seçenekler | `AskUserQuestion` / `ExitPlanMode` çağrısı açık |
+| `↩` | soruya verdiğin cevap | aynı çağrının sonucu |
+| `■` | tur bitti, seni bekliyor; yanında son cümle | `stop_reason: end_turn` |
+| `⟳` | döngü uyandı (`/loop`, cron); tur sonu seni beklemez | `origin`'siz slash komutu ya da `ScheduleWakeup` |
+| `⟲` | bağlam özetlendi | compaction |
+| `⚠` | api hatası | `system/api_error` |
+
+Panoda soru bekleyen şerit sarı kenarlıkla öne geçer, başlığında `? Şema seçimi` yazar;
+tur bitmiş şerit `■` alır ve onu izler. Altyazıda bağlam çubuğu `▮▮▮▮▯ 674k` (tavan 1M,
+`ctx_window` ile değişir; %60 sarı, %80 kırmızı) ve bekleme süresi `⧗ 3dk` durur.
+Pano açılışta her dosyanın son 256 KB'ından durumu kurar; akış açılışta yine sondan başlar.
+
+`--bell` soru ve tur sonunda terminal zili çalar (döngü uyanışları hariç); `--no-notes` bu
+satırların hepsini kapatır. `-q` çıktıyı gizler ama patlayan komutun ilk 3 satırı yine düşer.
 
 Her oturumun 4 karakterlik bir etiketi (`a3d1`) ve id'sinden türeyen sabit bir rengi var;
 şerit çubuğu `▌` o renkte. Subagent'lar kendi etiketini, rengini ve panoda kendi şeridini alır,
@@ -31,12 +57,15 @@ Araç işaretleri: `$` Bash · `▸` Read · `✎` Edit/Write · `⌕` Grep/Glob
 ```bash
 astream -p myapp -n 6          # sadece myapp projesi, komut başına 6 satır çıktı
 astream -s a3d1                # tek oturum
-astream -q                     # sadece komutlar, çıktı yok
+astream -q                     # sadece komutlar, çıktı yok (hatada 3 satır)
+astream -q --bell              # soru ya da tur sonunda zil
+astream --errors               # yalnız hata veren komutlar, eşli
+astream --no-notes             # insan satırı, soru, tur sonu gizli
 astream -m 4                   # uzun heredoc komutlarını 4 satırda kır (varsayılan 6, 0 = sınırsız)
 astream -B                     # yalnız Bash (varsayılan: Read, Edit, Grep, Task, MCP dahil hepsi)
 astream --theme ansi_dark      # komut bloğu teması (varsayılan monokai): nord, dracula, ansi_dark…
 astream -b 20                  # açılışta son 20 komutu da göster
-astream --json | jq -r .command   # NDJSON, satır başına bir tamamlanmış komut
+astream --json | jq -r '.command // empty'   # NDJSON; `event` alanı command · human · ask · answer · turn · fire · compact · apierr
 ```
 
 `--no-color`, `NO_COLOR`, `TERM=dumb` ve boru hattı algısı destekleniyor.
@@ -61,6 +90,8 @@ project = "myapp"
 max_lines = 8
 stale = 45
 theme = "monokai"
+bell = true
+ctx_window = 1000000
 ```
 
 Varsayılan tema `monokai`: her terminalde aynı çıkar, 24 bit renk desteklemeyen terminallerde
@@ -68,7 +99,7 @@ en yakın renge yuvarlanır. `ansi_dark` renkleri terminalin kendi paletinden al
 profilde (yeşil üstü siyah gibi) sözdizimi boyaması bilgi taşımaz, o yüzden varsayılan değil.
 
 Ayar dosyası `[genel]` bölümünün yanında alt komut bölümü de kabul eder (`[stream]`, `[dash]`,
-`[sessions]`, `[replay]`); alt komut bölümü `[genel]`i ezer, bayrak ve ortam değişkeni ikisini de.
+`[wait]`, `[sessions]`, `[replay]`, `[stats]`); alt komut bölümü `[genel]`i ezer, bayrak ve ortam değişkeni ikisini de.
 
 ## Kaynak tüketimi
 
@@ -96,7 +127,9 @@ Kurulamayan arka uç sessizce yoklamaya düşer, davranış değişmez.
 - Cloud oturumları görünmez; yerel transcript yazmıyorlar.
 - Varsayılan tüm araçlar; `-B/--bash-only` akışı yalnız kabuk komutlarına indirir.
 - Yoklama 250 ms; göz kararı anlık ama tam senkron değil.
-- Transcript'ler varsayılan olarak 30 gün tutuluyor, `replay` o pencereyle sınırlı.
+- Transcript'ler varsayılan olarak 30 gün tutuluyor, `replay` ve `stats` o pencereyle sınırlı.
+- Bekleme sinyali transcript'ten türer: `end_turn` sonrası oturum kapatılmışsa da "tur bitti" görünür; pano bekleyen şeridi `stale`'in dört katı tutar, sonra düşürür.
+- Bağlam çubuğunun tavanı tek sayı (`ctx_window`); modele göre pencere farkı bilinmiyor, sayı her zaman ham token.
 
 ## Çalıştırma ve depo
 

@@ -45,6 +45,8 @@ Bunlar bilinçli kararlar. Değiştirmeden önce burada neden yazdığına bak.
 | 13 | Pano yalnız **değişiklikte** çizer | Durum değişmediyse kare üretilmez; koşan komut varken spinner için 4 fps, boşta 5 sn'de bir. Koşulsuz 8 fps %8,8 CPU tutuyordu |
 | 14 | Ölçüm süreç **içinden** yapılır | `time.process_time`, sabit duvar penceresi. `RUSAGE_CHILDREN` yorumlayıcı açılışını da sayar ve boş kökte bile %1,9 gösterir |
 | 15 | Ayar dosyası **her** alt komutta okunur | `merged_config(ctx)`: `[genel]` + alt komutun kendi bölümü. Yalnız `stream`'de okunması, `theme` yazan kullanıcıya panoda başka renk gösteriyordu |
+| 16 | Bekleme sinyali **yalnız transcript'ten** | Süreç listesi, pencere başlığı, uygulama durumu okunmaz. `end_turn` + sonrasında insan satırı yok = bekliyor; oturum kapatılmış olsa da öyle görünür, bu kabul edilen yanlış pozitif (11.09) |
+| 17 | `--json` her olayı `event` alanıyla verir | Notlar da NDJSON'a düşer; `.command` notlarda yok, tüketici `.command // empty` der. Notları ayrı bayrağa saklamak, zil/bildirim yazan betikleri iki akış dinlemeye zorlardı |
 
 ## Python Standartları
 
@@ -72,8 +74,26 @@ Kullanıcıya giden her metin Türkçe; kod yorumu da Türkçe ve tek satır.
 | `agent-stream` | `stream` (root callback) | Varsayılan. Komut çalışınca başlık + komut, bitince çıktı + özet |
 | `agent-stream stream` | aynı fonksiyon, açık ad | `app.command("stream")(stream)` ile kayıtlı |
 | `agent-stream dash` | `dash` | `Live(screen=True)`; oturum başına panel, çalışanda spinner, altta son 5 komut |
+| `agent-stream wait` | `cmd_wait` | `seed_lanes` ile kuyruktan durum; bekleyenler önce (`Lane.order`), `--all` hepsi |
 | `agent-stream sessions` | `sessions` | Etiket, proje, boşta kalma, boyut |
-| `agent-stream replay <etiket>` | `replay` | Takip etmez; komut ve çıktısını eşli basar |
+| `agent-stream replay <etiket>` | `replay` | Takip etmez; komut ve çıktısını eşli basar; notlar da düşer |
+| `agent-stream stats` | `cmd_stats` | `--since` penceresinde tek geçiş; mtime ön filtresi + damga filtresi |
+
+## Olay Türleri
+
+`Reader.poll` iki sınıf üretir: `Cmd` (`start`/`end`) ve `Note`. Her ikisi `Keyed`: `key`
+(oturum + subagent), `tag`, `lane` ortak. Durum makinesi `apply(lanes, kind, ev)` tek yerde;
+pano, `wait` ve `seed_lanes` aynı fonksiyonu çağırır.
+
+| kind | kaynak satır | `apply` etkisi |
+| --- | --- | --- |
+| `human` | `type=user`, `origin.kind=human`, içerik string | `prompt`, bekleme sıfırlanır, `loop=False` |
+| `fire` | `type=user`, `origin` yok, içerik `<command-message>` | `loop=True`; sonraki `turn` beklemez |
+| `ask` / `answer` | `AskUserQuestion` ya da `ExitPlanMode` `tool_use` / eşleşen `tool_result` | `waiting="ask"`, `ask` notu; cevapta sıfır |
+| `turn` | `type=assistant`, `stop_reason=end_turn`, metin bloğu olan satır, sidechain değil | `waiting="turn"`; `extra.loop` ise yalnız `turn` metni |
+| `ctx` | her `assistant` satırındaki `usage` toplamı (input + cache_read + cache_creation) | `ctx`, `model`; akışta basılmaz, pano/wait çubuğu |
+| `compact` | `isCompactSummary` ya da `system/compact_boundary` | yalnız akışta satır |
+| `apierr` | `system/api_error` | `warn`; sonraki `start` siler |
 
 ## İzleyici Katmanı
 
@@ -124,13 +144,24 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `lane_panel` | Spinner gövdede, özet altyazıda | `Panel(subtitle=…)` yalnız metin kabul eder; `Columns` altyazıya konursa `AttributeError` |
 | `stream` | Bayraklar root callback'te | `agent-stream -n 3` alt komut yazmadan çalışsın; `stream` adı yine de açık dursun |
 | `main` | `except BrokenPipeError` | `agent-stream \| head` boruyu kapatınca traceback basılmamalı |
+| `Reader.poll` | `MARKS` ön elemesi | Tek `"tool_use"` testi notları kaçırıyordu; `<command-message>` de listede çünkü döngü ateşlemesinin `origin` alanı yok, başka hiçbir imzası da yok (11.09) |
+| `Reader.poll` | `mid` → ilk satır atılır | Kuyruktan başlayınca ilk satır yarım JSON; `json.loads` zaten atar ama bir sonraki satır yanlış birleşmesin diye baştan kesilir |
+| `Reader._side` | `if not first: return` (turn) | Aynı API yanıtı transcript'te birkaç `assistant` satırına bölünür, hepsi `end_turn` taşır; metinsiz olanlar basılsa "tur bitti" iki üç kez düşüyordu (11.09 d204'de görüldü) |
+| `Reader._side` | `origin is None` + `<command-message>` → `fire` | `/loop` ve cron ateşlemeleri `origin` taşımıyor; insan satırı sayılsa watcher oturumu her 10 dakikada "seni bekliyor" diyordu |
+| `Reader._events` | `ScheduleWakeup`/`CronCreate` → `loops` | Dinamik döngü ateşlemeyi kendisi planlar; `end_turn` sonrası uyanmayı bekler, kullanıcıyı değil |
+| `apply` | `turn`, `ask` varken ezmez | Soru sorulduktan sonra da `end_turn` gelir; soru daha somut bilgi, kaybolmamalı |
+| `cmd_dash` | Bekleyen şerit `stale`'in 4 katı | Sonsuz tutmak kapanmış oturumu panoda bırakıyordu; hiç ayrıcalık vermemek 15 dakikalık soruyu düşürüyordu |
+| `cmd_dash` | Açılışta `running` → `last` | Kuyruk tohumunda yarım kalan `tool_use` gerçekte bitmiş olabilir; spinner sonsuza dek dönerdi |
+| `ctx_bar` | `CTX_WINDOW` tek sabit | Modele göre pencere tablosu tahmin olurdu; sayı ham gösterilir, çubuk `ctx_window` ayarıyla ölçeklenir |
+| `cmd_wait` | `waiting_s` yalnız beklerken | `since` cevap sonrası da duruyor; "boşta" satırında süre yanıltıyordu |
 
 ## Bilinen Sınırlar
 
 - Cloud oturumları görünmez: yerel transcript yazmıyorlar.
 - Varsayılan tüm araçlar; `-B/--bash-only` yalnız kabuk komutlarını bırakır.
 - Yoklama 250 ms (`--interval`); göz kararı anlık ama tam senkron değil.
-- Transcript'ler varsayılan 30 gün tutulur; `replay` o pencereyle sınırlı.
+- Transcript'ler varsayılan 30 gün tutulur; `replay` ve `stats` o pencereyle sınırlı.
+- "Tur bitti" kapatılmış oturumda da görünür; transcript'te kapanış imzası yok.
 
 ## Doküman Bakımı
 
