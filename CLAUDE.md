@@ -163,6 +163,10 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `web_theme` | özel `TerminalTheme` | Rich'in `MONOKAI` terminal teması `green`'i #527618 basıyor; şerit renkleri telefonda okunmuyordu |
 | `lan_ip` | UDP `connect` numarası | Paket gitmez, yalnız çekirdeğin seçeceği kaynak adres okunur; `gethostbyname` çoğu Mac'te 127.0.0.1 döner |
 | `announce` | QR `out=sys.stderr` | segno varsayılan stdout'a basar; stdout veri kanalı (2 numaralı kural) |
+| `highlight` | `no_wrap=False, overflow="fold"` | `Syntax.highlight` no_wrap döner; uzun tek satır komut terminalde ve telefonda sağdan kesiliyordu (11.09 telefon ekran görüntüsü: `git add src/lib/` diye bitiyordu) |
+| `Reader._summary` | anahtar sırası + `actions` adları | MCP çağrıları ham JSON olarak düşüyordu; `browser_batch` için adım adları, kalan için yalnız kısa skaler alanlar |
+| `StreamView.note` | `width = max(..., 240)` + fold | `»` ve `■` satırları telefonda 42 karakterde kesiliyordu; sarılınca çubuk devam ediyor, okunur |
+| `Cmd.body` | boş satır elenir | `-n 4` kuyruğunda iki boş satır iki gerçek satırı yiyordu |
 | `cmd_wait` | `waiting_s` yalnız beklerken | `since` cevap sonrası da duruyor; "boşta" satırında süre yanıltıyordu |
 
 ## Bilinen Sınırlar

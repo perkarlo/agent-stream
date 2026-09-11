@@ -65,6 +65,9 @@ boyama, `»` `?` `■` satırları terminaldekiyle aynı, 56 kolon. Tepede sabit
 özeti: `? b7c9 Şema seçimi · ■ d204 1sa 9dk · ● e58f`. Sonradan bağlanan tarayıcı son
 300 parçayı da alır. Kaydırıp yukarı çıkınca takip durur, `↓ takip` düğmesi geri döndürür.
 
+Tepe şerit haplardan oluşur: sarı `? b7c9 Şema seçimi` soru, beyaz `■ d204 3dk` tur bitti,
+yeşil `● e58f myapp` çalışıyor, gri `⟳`/`⧗` döngü ya da arka plan işi.
+
 Sunucu yalnız okur, yalnız o rastgele yolu bilene cevap verir, başka her yol 404. Yine de
 transcript'te komut çıktıları ve sunucu adları var: yalnız güvendiğin ağda aç. Kapı `--port`,
 ayar dosyasında `port`, ortamda `AGENT_STREAM_PORT`. `asdash --serve` de çalışır; pano

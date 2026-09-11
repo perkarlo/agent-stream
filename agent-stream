@@ -215,6 +215,7 @@ def highlight(code: str) -> Text:
         from rich.syntax import Syntax                     # pygments yalnız renkli yolda
         hit = Syntax(code, "bash", theme=THEME, background_color="default").highlight(code)
         hit.rstrip()
+        hit.no_wrap, hit.overflow = False, "fold"          # Syntax no_wrap döner; uzun satır kırpılıyordu
         if len(_HL) > 256:
             _HL.clear()
         _HL[key] = hit
@@ -452,8 +453,9 @@ class Cmd(Keyed):
 
     @property
     def body(self) -> list[tuple[str, bool]]:
-        """Çıktı satırları: (metin, stderr mi)."""
-        return [(l, False) for l in self.out.splitlines()] + [(l, True) for l in self.err.splitlines()]
+        """Çıktı satırları: (metin, stderr mi); boş satırlar sayılmaz, ekranda yer yiyordu."""
+        return [(l, False) for l in self.out.splitlines() if l.strip()] + \
+               [(l, True) for l in self.err.splitlines() if l.strip()]
 
     def as_json(self) -> dict:
         return {
@@ -565,9 +567,15 @@ class Reader:
     def _summary(self, tool: str, inp: dict) -> str:
         if tool == "Bash":
             return str(inp.get("command", ""))
-        arg = inp.get("file_path") or inp.get("pattern") or inp.get("url") or inp.get("skill") \
-            or inp.get("query") or inp.get("command") or inp.get("prompt") \
-            or json.dumps(inp, ensure_ascii=False)
+        arg = next((inp[k] for k in ("file_path", "pattern", "url", "skill", "query", "command",
+                                     "prompt", "text", "message", "card", "name") if inp.get(k)), None)
+        actions = inp.get("actions")
+        if arg is None and isinstance(actions, list):     # browser_batch gibi: adım adları yeter
+            arg = " → ".join(str(a.get("name", "?")) for a in actions if isinstance(a, dict))
+        if arg is None:                                    # kalan: yalnız kısa skaler alanlar
+            arg = " ".join(f"{k}={v}" for k, v in inp.items()
+                           if isinstance(v, (str, int, float, bool)) and len(str(v)) <= 40) \
+                or json.dumps(inp, ensure_ascii=False)
         return f"{pretty_tool(tool)} {clip(str(arg).replace(chr(10), ' '), 160)}"
 
     def _result(self, entry: dict, block: dict) -> tuple[str, str, bool]:
@@ -837,7 +845,8 @@ class StreamView:
         g = NOTE_GLYPH.get(n.kind, "·")
         head = Text(n.ts.strftime("%H:%M:%S "), style="dim")
         head.append(n.tag, style=f"bold {n.lane}")
-        width = self.c.width - 14
+        width = max(self.c.width - 14, 240)              # satır sarılır; kesme yalnız çok uzunda
+        head.overflow = "fold"
         if n.kind == "human":
             head.append("  " + clip(n.text.replace("\n", " ⏎ "), width), style="bold")
         elif n.kind == "fire":
@@ -909,13 +918,17 @@ WEB_PAGE = """<!doctype html><html lang="tr"><head><meta charset="utf-8">
 <title>agent-stream</title>
 <style>
 body{margin:0;background:#1e1f1c;color:#f8f8f2;font:12px/1.35 ui-monospace,Menlo,monospace}
-#b{position:sticky;top:0;background:#272822;border-bottom:1px solid #49483e;padding:6px 8px;
-   white-space:nowrap;overflow-x:auto}
-#b .y{color:#e6db74;font-weight:bold}#b .g{color:#a6e22e}#b .d{color:#75715e}#b .w{font-weight:bold}
-#b:empty::before{content:"bekleyen yok";color:#75715e}
+div#b{position:sticky;top:0;background:#2d2e28;border-bottom:1px solid #5a594c;padding:7px 8px;
+   white-space:nowrap;overflow-x:auto;display:flex;gap:6px;align-items:center}
+div#b::before{content:"agent-stream";color:#75715e;margin-right:4px}
+div#b span{padding:2px 8px;border-radius:10px;background:#3e3d32;color:#f8f8f2}
+div#b .y{background:#e6db74;color:#272822;font-weight:bold}
+div#b .w{background:#f8f8f2;color:#272822;font-weight:bold}
+div#b .g{color:#a6e22e}#b .d{color:#a5a396}
+div#b:empty::after{content:"oturum yok";color:#75715e}
 pre{margin:0;padding:6px 8px 40px;white-space:pre;overflow-x:auto}
-#s>span{display:block}
-#f{position:fixed;right:10px;bottom:10px;background:#49483e;color:#f8f8f2;border:0;border-radius:14px;
+pre#s>span{display:block}
+button#f{position:fixed;right:10px;bottom:10px;background:#49483e;color:#f8f8f2;border:0;border-radius:14px;
    padding:6px 12px;font:inherit;display:none}
 @media (max-width:480px){body{font-size:10.5px}}
 </style></head><body><div id="b"></div><pre id="s"></pre><button id="f">↓ takip</button>
@@ -1016,10 +1029,12 @@ class WebSink:
                 wait = (datetime.now(tz=l.since.tzinfo) - l.since).total_seconds() if l.since else 0
                 parts.append(f'<span class="w">■ {escape(l.tag)} {short_dur(wait)}</span>')
             elif l.running:
-                parts.append(f'<span class="g">● {escape(l.tag)}</span>')
+                parts.append(f'<span class="g">● {escape(l.tag)} {escape(os.path.basename(l.cwd) or "~")}</span>')
             elif l.loop:
                 parts.append(f'<span class="d">{"⧗" if l.bg else "⟳"} {escape(l.tag)}</span>')
-        return "  ".join(parts)
+            else:
+                parts.append(f'<span class="d">· {escape(l.tag)}</span>')
+        return "".join(parts)
 
     def feed(self, kind: str, ev: Cmd | Note) -> None:
         apply(self.lanes, kind, ev)
