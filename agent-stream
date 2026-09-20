@@ -4,7 +4,7 @@
 # dependencies = ["rich>=13.7", "segno>=1.6"]
 # ///
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  agent-stream — Claude Code oturumlarının komut akışı                     ║
+# ║  agent-stream · Claude Code oturumlarının komut akışı                     ║
 # ║                                                                          ║
 # ║  Kullanım:                                                               ║
 # ║    1) Akış:      agent-stream [-p proje] [-n satır]                      ║
@@ -14,7 +14,7 @@
 # ║    5) Makine:    agent-stream --json                                     ║
 # ║    6) Telefon:   agent-stream --serve  (ev ağında, QR terminalde)        ║
 # ║                                                                          ║
-# ║  Kaynak: ~/.claude/projects/<proje>/<session>.jsonl — salt okunur.       ║
+# ║  Kaynak: ~/.claude/projects/<proje>/<session>.jsonl · salt okunur.       ║
 # ║  Hiçbir oturuma yazmaz, hook kurmaz, süreç başlatmaz.                    ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 from __future__ import annotations
@@ -299,7 +299,7 @@ class KqueueWatcher(PollWatcher):
 
 
 class InotifyWatcher(PollWatcher):
-    """Linux: dizin izlemek yeterli — içindeki dosyaların olayları da adıyla gelir."""
+    """Linux: dizin izlemek yeterli, içindeki dosyaların olayları da adıyla gelir."""
 
     name = "inotify"
     IN_MODIFY, IN_ATTRIB, IN_CREATE = 0x00000002, 0x00000004, 0x00000100
@@ -1346,7 +1346,7 @@ def dash_frame(lanes: dict[str, Lane], recent: list[Cmd], started: float,
     height = min(room, max([9] + [lane_need(pt) for pt in parts])) if shown else room
     body = Columns([lane_panel(l, height, width, pt, ctx_window) for l, pt in zip(shown, parts)],
                    equal=True, expand=True) \
-        if shown else Panel(Text("aktif oturum yok — Claude Code'da bir komut çalıştır", style="dim italic"),
+        if shown else Panel(Text("aktif oturum yok, Claude Code'da bir komut çalıştır", style="dim italic"),
                             border_style="dim", height=height)
 
     tail = Table.grid(padding=(0, 1))

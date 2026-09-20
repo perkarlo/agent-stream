@@ -193,7 +193,28 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | Yeni bağımlılık | shebang'deki PEP 723 bloğu | ✅ |
 | Çıkış kodu sözleşmesi | README · bu dosya | ✅ |
 | Yeni tuzak/gerekçe | Kodda tek satır yorum + "Savunma Satırları" tablosu | ✅ 4+ satırlık blok reddedilir |
+| Örnek, yol ya da adres eklemek | Yalnız kurgusal değer kullan | ✅ sızıntı taraması (yol, e-posta, token kalıbı) |
+
+## Sızıntı Taraması
+
+`checks.sh`'in son kontrolü, yayınlanan ağaçta kullanıcı ana dizini yolu,
+e-posta adresi ve bilinen token kalıpları arar. Gezdiği küme
+`git ls-files --cached --others --exclude-standard`: commit'lenmemiş yeni bir
+dosyadaki sır, push'tan sonra değil commit'ten önce yakalanmalı.
+
+| Karar | Neden |
+| --- | --- |
+| Yalnız genel kalıplar, terim listesi yok | Bir kez temizlenen iç adları kontrole yazmak, izlerin kendisini depoya geri koymak olurdu |
+| Eşleşen metin maskelenir (ilk 4 karakter + uzunluk) | Sır tarayıcısı sırrı CI loguna basmamalı; yerini dosya ve satır numarası söylüyor |
+| Dosya ve kalıp başına ilk 3 eşleşme | Tek eşleşme gösterilseydi aynı dosyadaki ikinci sır ilk turda görünmezdi |
+| Yol kalıbı parantezli ve `[A-Za-z]` ile biter | Düz yazılsaydı kalıbın kendisi `checks.sh` içinde eşleşirdi; büyük harfle başlayan kullanıcı adları da kapsanır |
+| Token kalıplarında uzunluk şartı | Kalıplar bu dosyada da yazılı; uzunluk şartı olmasaydı kontrol kendi dokümanını sır sanardı |
+| `git rev-parse` başarısızsa kırmızı | git yoksa hangi dosyaların yayınlanacağı bilinemez; sessizce geçmek dayanaksız ✓ olurdu |
+
+Kontrol `--others` sayesinde `checks.sh`'in kendisini de gezdiği için "0 dosya
+gezildi" dalı depo içinden tetiklenemez; ulaşılabilir koruma git ağacı
+bulunamadığında devreye girer.
 
 Yorum politikası: kodda bölüm başlıkları ve **tek satırlık** "ne yapıyor" notları kalır;
-"neden" buraya yazılır. `checks.sh` bunu zorlar — 4 veya daha fazla ardışık yorum satırı
+"neden" buraya yazılır. `checks.sh` bunu zorlar: 4 veya daha fazla ardışık yorum satırı
 CI'yı kırar (dosya başlığındaki banner ve `# ───` bölüm başlıkları hariç).

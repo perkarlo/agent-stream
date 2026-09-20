@@ -69,7 +69,7 @@ done
 if [ -z "$undeclared$uninstalled" ]; then
   ok "bağımlılık bloğu importlarla tutarlı: $(echo "$deps" | tr '\n' ' ')"
 else
-  fail "bağımlılık sapması — bildirilmemiş:${undeclared:- yok} · kullanılmayan:${uninstalled:- yok}" \
+  fail "bağımlılık sapması, bildirilmemiş:${undeclared:- yok} · kullanılmayan:${uninstalled:- yok}" \
        "Shebang altındaki PEP 723 bloğu tek kaynak; uv o listeyi kurar."
 fi
 
@@ -91,6 +91,46 @@ if [ -z "$missing_w" ]; then
 else
   fail "dokümanda geçmeyen arka uç:$missing_w" \
        "Arka uç eklendiyse README kaynak tüketimi bölümü ve CLAUDE.md izleyici tablosu güncellenmeli."
+fi
+
+# ─── 8. Yayınlanan ağaçta kullanıcı yolu, e-posta ya da token kalmamalı ──────
+PAT_PATH='/(Users|home)/[A-Za-z]'
+PAT_MAIL='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+PAT_TOKEN='hk_[A-Za-z0-9]{8,}|Bearer [A-Za-z0-9_.-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{16,}|sk_(live|test)_[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16}'
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  fail "git çalışma ağacı değil, tarama yapılamadı" \
+       "Tarama yayınlanan ağacı gezer; git yoksa hangi dosyaların yayınlanacağı bilinemez."
+else
+  # Index'e ek olarak commit'lenmemiş dosyalar da gezilir: sır push'tan önce yakalanmalı.
+  TRACKED=$(git ls-files --cached --others --exclude-standard)
+  scanned=0
+  leaks=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -f "$f" ] || continue
+    scanned=$((scanned + 1))
+    for pair in "yol:$PAT_PATH" "eposta:$PAT_MAIL" "token:$PAT_TOKEN"; do
+      label=${pair%%:*}; pat=${pair#*:}
+      while IFS= read -r m; do
+        [ -n "$m" ] || continue
+        ln=${m%%:*}; txt=${m#*:}
+        head4=$(printf '%s' "$txt" | cut -c1-4)
+        leaks="$leaks
+       ${f}:${ln} [${label}] ${head4}... (${#txt} karakter)"
+      done <<< "$(grep -n -o -E "$pat" "$f" 2>/dev/null | head -3)"
+    done
+  done <<< "$TRACKED"
+
+  if [ "$scanned" -eq 0 ]; then
+    fail "Tarama 0 dosya gezdi" \
+         "Dosya listesi boş döndü; kalıp kontrolleri hiçbir şey bulamaz ve dayanaksız yeşil basardı."
+  elif [ -z "$leaks" ]; then
+    ok "sızıntı taraması temiz (${scanned} dosya gezildi: yol, e-posta, token)"
+  else
+    fail "yayınlanan ağaçta kalıp eşleşmesi var (${scanned} dosya gezildi, dosya başına ilk 3):${leaks}" \
+         "Eşleşen metin maskelendi; yerini dosya ve satır numarası söylüyor. Kullanıcı yolu, e-posta ve token bu depoya girmez."
+  fi
 fi
 
 echo
