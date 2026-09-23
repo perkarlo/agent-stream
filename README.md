@@ -1,8 +1,12 @@
 # agent-stream
 
+[![Lint](https://github.com/perkarlo/agent-stream/actions/workflows/lint.yml/badge.svg)](https://github.com/perkarlo/agent-stream/actions/workflows/lint.yml)
+
 Claude Code oturumlarının çalıştırdığı komutları ve çıktılarını terminalde canlı akıtır.
 Kaynak, her oturumun kendi yazdığı transcript: `~/.claude/projects/<proje>/<session>.jsonl`.
 Hook yok, sarmalayıcı yok, oturuma dokunmuyor: salt okunur bir takipçi.
+
+![Üç oturumun komut akışı tek terminalde: insan satırı, komutlar ve çıktıları, arka plan işi, tur sonu, açık soru](docs/terminal.png)
 
 ```bash
 astream                       # tüm aktif oturumların komut akışı
@@ -21,6 +25,8 @@ astream wait                  # senden cevap bekleyen oturumlar
 | `astream sessions` | aktif oturumlar: etiket, proje, boşta kalma süresi |
 | `astream replay a3d1` | geçmiş bir oturumun tüm komutlarını baştan yazar |
 | `astream stats` | son 7 günün özeti: oturum, istek, soru, komut, hata, araç ve model dağılımı, saat histogramı, gece payı. `--since 24h` |
+
+![asdash: üç oturum yan yana şeritlerde; soru, tur sonu ve çalışan komut, altta son komutlar](docs/dash.png)
 
 ## Oturumlar sana gelir
 
@@ -73,6 +79,8 @@ yeşil `● e58f myapp` çalışıyor, gri `⟳`/`⧗` döngü ya da arka plan i
 Sayfanın kimliği mail ajanı raporlarıyla ortak: tepede 4px `#D97757` şerit, yanında ASCII
 maskot, üstünde büyük harf aralıklı `agent-stream` etiketi; soru hapı ve `↓ takip` düğmesi de
 aynı turuncuyu taşır. Akışın kendisi monokai kalır, komut boyaması koyu zemine göre seçildi.
+
+<img src="docs/phone.png" width="300" alt="Telefon sayfası: tepede soru, tur bitti ve çalışıyor hapları; altında aynı akış, 56 kolon">
 
 Sunucu yalnız okur, yalnız o rastgele yolu bilene cevap verir, başka her yol 404. Yine de
 transcript'te komut çıktıları ve sunucu adları var: yalnız güvendiğin ağda aç. Kapı `--port`,
@@ -162,16 +170,23 @@ Kurulamayan arka uç sessizce yoklamaya düşer, davranış değişmez.
 
 ## Çalıştırma ve depo
 
-Dosyanın shebang'i `uv run --script`; bağımlılıklar (typer, rich) ilk çalıştırmada
+Dosyanın shebang'i `uv run --script`; bağımlılıklar (rich, segno) ilk çalıştırmada
 uv tarafından kurulur, sonra ~0.3 sn'de açılır. uv yoksa `python3 agent-stream` da çalışır.
 
-`.zshrc` içindeki alias'lar: `astream` (akış) ve `asdash` (pano).
+Depo: <https://github.com/perkarlo/agent-stream>. Kurulum tek klon ve `.zshrc`'ye iki alias:
+
+```bash
+git clone https://github.com/perkarlo/agent-stream.git ~/.local/share/agent-stream
+alias astream=~/.local/share/agent-stream/agent-stream
+alias asdash='astream dash'
+```
 
 ```
 agent-stream            tek çalıştırılabilir, tüm kod burada
 README.md               bu dosya
 CLAUDE.md               Claude Code için kural ve gerekçe kaydı
 config.example.toml     ayar dosyası örneği
+docs/                   README ekran görüntüleri; sahte oturumlardan üretildi, gerçek transcript yok
 .github/checks.sh       kod ↔ doküman tutarlılık kontrolleri
 ```
 

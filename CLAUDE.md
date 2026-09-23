@@ -16,6 +16,7 @@ dosyalık Python CLI. Kaynak, oturumların kendi yazdığı transcript'ler:
 ├── README.md                   # kullanıcı dokümanı (görünümler, bayraklar, ayar)
 ├── CLAUDE.md                   # bu dosya
 ├── config.example.toml         # ~/.config/agent-stream/config.toml örneği
+├── docs/                       # README ekran görüntüleri (terminal.png, dash.png, phone.png); sahte transcript'lerden, gerçek oturum yok
 ├── LICENSE                     # MIT
 └── .github/
     ├── checks.sh               # tutarlılık kontrolleri; lokalde de çalıştırılabilir
