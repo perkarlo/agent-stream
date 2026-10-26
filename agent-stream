@@ -37,7 +37,7 @@ from rich.console import Console, Group, RenderableType
 from rich.segment import Segment, Segments
 from rich.text import Text
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 HOME = Path.home()
 DEFAULT_ROOT = Path(os.environ.get("AGENT_STREAM_ROOT", HOME / ".claude" / "projects"))
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agent-stream" / "config.toml"
