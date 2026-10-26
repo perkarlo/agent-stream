@@ -141,6 +141,7 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `_result` | `"stdout" in tur` koşulu | `toolUseResult` yalnız Bash'te `stdout`/`stderr` taşıyor; Read/Edit/MCP sonuçları `tool_result` bloğunda. Koşulsuz `tur.get("stdout")` bütün Bash dışı araçlara "çıktı yok" dedirtiyordu (10.09, tüm araçlar varsayılan olduktan sonra görüldü) |
 | `clean` | `SYSREM` deseni | `tool_result` içine eklenen `<system-reminder>` blokları kullanıcının komut çıktısı değil |
 | `parse_ts` | `.replace("Z", "+00:00").astimezone()` | Transcript UTC yazar; ekranda yerel saat okunur |
+| `parse_ts` | yedek `datetime.now().astimezone()` | Saatsiz kayda saf `now()` dönüyordu; tur sonundaki sıralama saf saatle tz'li saati karşılaştıramayıp `TypeError` ile çöktü (26.10, `--serve` açıkken) |
 | `lane_panel` | Komut satır satır, `max_cmd` ile kırpık | İlk tasarım satır sonlarını ` ⏎ ` ile birleştirip tek satıra sıkıştırıyordu; heredoc'lu komutlar şeritte okunmaz oluyordu (10.09 panoda görüldü) |
 | `lane_panel` | Çıktı kuyruğu komutun hemen altında | Dibe yapıştırılınca (ilk tasarım) uzun terminalde komut ile çıktısı arasında ekran boyu boşluk kalıyordu; kuyruk yine son satırlar, ama başlığa bitişik |
 | `lane_panel` | `Panel(..., width=width)` | Genişlik verilmezse `Columns` panelleri yan yana değil alt alta yığar |
@@ -155,6 +156,7 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `Reader._side` | `origin is None` + `<command-message>` → `fire` | `/loop` ve cron ateşlemeleri `origin` taşımıyor; insan satırı sayılsa watcher oturumu her 10 dakikada "seni bekliyor" diyordu |
 | `Reader._events` | `ScheduleWakeup`/`CronCreate` → `loops` | Dinamik döngü ateşlemeyi kendisi planlar; `end_turn` sonrası uyanmayı bekler, kullanıcıyı değil |
 | `Reader._events` | `Monitor` / `run_in_background` → `bg` sayacı | Arka plan işi varken `end_turn` kullanıcıyı değil bildirimi bekler; sayaç turlar boyu sürer, `task-notification` düşürür (11.09 ekran görüntüsü: "1 running task" varken "tur bitti" yazıyordu) |
+| `Reader._events` / `cmd_stats` | `MSG_TYPES` süzgeci | Claude Code transcript'e `api-request-blob` kaydı yazıyor (26.10'da 2.1.308'de görüldü): API'ye giden mesajın kopyası, `tool_use`/`tool_result` taşıyor ama `timestamp` ve `cwd` yok. Süzgeçsiz her komut akışa ikinci kez `?` projesiyle ve o anın saatiyle düşüyor, `stats` de iki kez sayıyordu. Ölçüm: son iki günün 188 dosyasının 162'sinde 2.118 kopya, hiçbirinin `tool_use` id'si yalnız kopyada değil |
 | `unmark` | tur özetinde `**`, backtick, `#` ayıklanır | Ajanın ilk cümlesi markdown; akışta `**Hot fix indi:**` diye ham düşüyordu |
 | `apply` | `turn`, `ask` varken ezmez | Soru sorulduktan sonra da `end_turn` gelir; soru daha somut bilgi, kaybolmamalı |
 | `cmd_dash` | Bekleyen şerit `stale`'in 4 katı | Sonsuz tutmak kapanmış oturumu panoda bırakıyordu; hiç ayrıcalık vermemek 15 dakikalık soruyu düşürüyordu |

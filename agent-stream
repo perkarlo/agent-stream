@@ -62,6 +62,7 @@ WEB_RING = 300                      # geç bağlanan istemciye gönderilen geçm
 MARKS = ('"tool_use"', '"tool_result"', '"kind":"human"', '"kind":"task-notification"',
          '<command-message>', '"end_turn"',
          '"isCompactSummary":true', '"api_error"', '"compact_boundary"')
+MSG_TYPES = ("user", "assistant", "system")  # olay yalnız mesaj kayıtlarından; api-request-blob kopyası dışarıda
 
 THEME = "monokai"                   # komut bloğunun renk teması; --theme ile değişir
 
@@ -149,11 +150,11 @@ def clip(s: str, n: int) -> str:
 
 def parse_ts(iso: str | None) -> datetime:
     if not iso:
-        return datetime.now()
+        return datetime.now().astimezone()
     try:
         return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
     except ValueError:
-        return datetime.now()
+        return datetime.now().astimezone()
 
 
 def pretty_model(name: str) -> str:
@@ -674,6 +675,8 @@ class Reader:
         return self._note(entry, "answer", clean(text), header=ask.text, tool=ask.extra.get("tool", ""))
 
     def _events(self, entry: dict) -> Iterable[tuple[str, Cmd | Note]]:
+        if entry.get("type") not in MSG_TYPES:
+            return
         yield from self._side(entry)
         content = (entry.get("message") or {}).get("content")
         if not isinstance(content, list):
@@ -1836,6 +1839,8 @@ def cmd_stats(args) -> None:
             try:
                 e = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if e.get("type") not in MSG_TYPES:
                 continue
             ts = parse_ts(e.get("timestamp"))
             if ts.timestamp() < cutoff:
