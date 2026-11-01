@@ -66,7 +66,7 @@ Araç işaretleri: `$` Bash · `▸` Read · `✎` Edit/Write · `⌕` Grep/Glob
 astream -q --serve            # aynı akış ev ağında; adres ve QR terminale basılır
 ```
 
-Terminal çıktısı aynen sürer; yanına `http://192.168.x.x:7373/k/<rastgele>/` gelir ve QR'ı
+Terminal çıktısı aynen sürer; yanına `HTTP://192.168.x.x:7373/K/<rastgele>/` gelir ve QR'ı
 telefonla okutursun. Sayfa Rich'in kendi HTML çıktısını SSE ile alır: şerit çubuğu, monokai
 boyama, `»` `?` `■` satırları terminaldekiyle aynı, 56 kolon. Tepede sabit şerit `wait`'in
 özeti: `? b7c9 Şema seçimi · ■ d204 1sa 9dk · ● e58f`. Sonradan bağlanan tarayıcı son

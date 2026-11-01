@@ -996,16 +996,32 @@ def lan_ip() -> str:
         return "127.0.0.1"
 
 
+def qr_cells(matrix: Iterable[Iterable[int]]) -> str:
+    """QR satıra iki modül: tek renkli hücre ters video zemin, karışık hücre ▄ (bit 1 = koyu)."""
+    rows = [[not bit for bit in row] for row in matrix]
+    lines = []
+    for top, bot in zip(rows[::2], rows[1::2] + [[True] * len(rows[0])]):
+        out, rev = [], None
+        for t, b in zip(top, bot):
+            if t != rev:
+                out.append("\033[7m" if t else "\033[27m")
+                rev = t
+            out.append(" " if t == b else "▄")
+        lines.append("".join(out) + "\033[0m")
+    return "\n".join(lines)
+
+
 class WebSink:
     """Akışı HTML parçaları olarak SSE ile yayınlar; rastgele yol dışında hiçbir şey vermez."""
 
     def __init__(self, port: int, max_lines: int, show_desc: bool, show_output: bool, max_cmd: int):
         import io
         import secrets
+        import string
         import threading
         from collections import deque
         from http.server import ThreadingHTTPServer
-        self.token = secrets.token_urlsafe(9)
+        self.token = "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(10))
         self.lock = threading.Lock()
         self.clients: list = []
         self.ring: deque = deque(maxlen=WEB_RING)
@@ -1022,13 +1038,17 @@ class WebSink:
 
     @property
     def url(self) -> str:
-        return f"http://{lan_ip()}:{self.port}/k/{self.token}/"
+        return f"HTTP://{lan_ip()}:{self.port}/K/{self.token}/"
 
     def announce(self, console: Console) -> None:
         """Adres ve QR stderr'e; stdout veri kanalı."""
         import segno
         console.print(f"[bold]telefon:[/] {self.url}", highlight=False)
-        segno.make(self.url, error="l").terminal(out=sys.stderr, compact=True, border=1)
+        qr = segno.make(self.url, error="l")
+        if sys.stderr.isatty():
+            print(qr_cells(qr.matrix_iter(scale=1, border=2)), file=sys.stderr)
+        else:
+            qr.terminal(out=sys.stderr, compact=True, border=2)
 
     # -- yayın
     def _emit(self, event: str, payload: str) -> None:
@@ -1104,7 +1124,7 @@ class WebSink:
         import queue
         from http.server import BaseHTTPRequestHandler
         sink = self
-        page, events = f"/k/{self.token}/", f"/k/{self.token}/events"
+        page, events = f"/K/{self.token}/", f"/K/{self.token}/events"
 
         class H(BaseHTTPRequestHandler):
             def log_message(self, *a):                     # erişim logu stderr'i kirletmesin

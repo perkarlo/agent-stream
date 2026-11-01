@@ -171,6 +171,8 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `web_theme` | özel `TerminalTheme` | Rich'in `MONOKAI` terminal teması `green`'i #527618 basıyor; şerit renkleri telefonda okunmuyordu |
 | `lan_ip` | UDP `connect` numarası | Paket gitmez, yalnız çekirdeğin seçeceği kaynak adres okunur; `gethostbyname` çoğu Mac'te 127.0.0.1 döner |
 | `announce` | QR `out=sys.stderr` | segno varsayılan stdout'a basar; stdout veri kanalı (2 numaralı kural) |
+| `qr_cells` | tek renkli hücre ters video zemin, karışık hücre `▄`, kenar 2 | Terminal.app'te SF Mono'nun blok glifleri 1 em (14 pt), satır 1,19 em çarpı satır aralığı. segno `compact` çiziminde her satırın alt %26'sı koyu şerit kaldı, telefon okumadı (01.11). Zemin hücreyi tam boy boyar, şerit yalnız karışık hücrede 2,5 px kalır. Tam zemin (`compact=False`) de okundu ama iki kat boy; kenar 1 okunmadı. TTY değilse eski `compact` çizimi, log kaçış kodu taşımasın |
+| `WebSink.url` | `HTTP://…/K/<10 karakter A-Z0-9>/` | Adres yalnız büyük harf ve rakamsa QR alfanümerik kipe geçer: 192.168.x.x adresinde sürüm 3'ten 2'ye (29'dan 25 modüle). Şema ve host büyük harfe duyarsız, yol `/K/` diye eşlenir. 52 bitlik anahtar ev ağında tahmin edilemez |
 | `highlight` | `no_wrap=False, overflow="fold"` | `Syntax.highlight` no_wrap döner; uzun tek satır komut terminalde ve telefonda sağdan kesiliyordu (11.09 telefon ekran görüntüsü: `git add src/lib/` diye bitiyordu) |
 | `Reader._summary` | anahtar sırası + `actions` adları | MCP çağrıları ham JSON olarak düşüyordu; `browser_batch` için adım adları, kalan için yalnız kısa skaler alanlar |
 | `StreamView.note` | `width = max(..., 240)` + fold | `»` ve `■` satırları telefonda 42 karakterde kesiliyordu; sarılınca çubuk devam ediyor, okunur |
