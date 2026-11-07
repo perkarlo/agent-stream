@@ -151,7 +151,11 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 | `Reader.poll` | `MARKS` ön elemesi | Tek `"tool_use"` testi notları kaçırıyordu; `<command-message>` de listede çünkü döngü ateşlemesinin `origin` alanı yok, başka hiçbir imzası da yok (11.09) |
 | `Reader.poll` | `TAIL_BYTES` 1 MB + tek satırsa 8 katı | Ekran görüntüsü sonuçları transcript'e 850 KB'lık tek satır yazıyor; 256 KB'lık kuyruk o satırın içine düşünce `wait` oturumu hiç görmüyordu (11.09 e58f) |
 | `Reader.poll` | tur sonunda zaman damgasıyla kararlı sıralama | Olaylar dosya sırasıyla geliyordu; iki oturum aynı saniyelerde yazınca akışta 05:30:42 satırı 05:30:40'tan önce düşüyordu (11.09 telefon). `end` için `ended`, `start` için `started`, not için `ts` |
-| `Reader.poll` | `mid` → ilk satır atılır | Kuyruktan başlayınca ilk satır yarım JSON; `json.loads` zaten atar ama bir sonraki satır yanlış birleşmesin diye baştan kesilir |
+| `Reader.poll` | `mid` → ilk satır atılır | Kuyruktan başlayınca ilk satır yarım JSON; baştan kesilir, `json.loads`'a gitmez. Offset bu kesimden önceki `raw` üzerinden hesaplanır: 8 katında da `\n` yoksa `raw` boşalır, offset o okumanın başında kalır, sonraki turda dev satırın parçasını `json.loads` eler, ardındaki satırlar normal işlenir |
+| `Reader.poll` / `cmd_stats` | `split("\n")`, `splitlines` değil | `splitlines` U+2028, U+2029 ve U+0085'te de böler; JSON bu karakterleri metin içinde ham bırakır. Satır iki parçaya düşüp `json.loads`'ta eleniyordu: `tool_result` ise komut `end` almadan koşuyor görünüyor, `stats` eksik sayıyordu (07.11, #1). Son 40 transcript'te 1 satır böyleydi. `Cmd.body`, `cut_cmd`, `lane_parts` gibi ekran metni çağrıları transcript satırı bölmez, `splitlines` kalır |
+| `Reader.poll` | `end - len(raw) + cut` | Yarım son satır tüketilmez: offset son `\n`'in ardına iner, kalan sonraki turda baştan okunur. Tüketilince sonraki tur satırın ortasından başlıyor, iki parça da `json.loads`'ta eleniyor, `end` hiç gelmiyordu (07.11, #2). Hesap okumanın sonundan geriye: `mid`'de ikinci okuma `size - 8*tail`'den başlar; ilk okumanın başlangıcına uzunluk eklemek offset'i dosya boyunun ötesine taşır, sonraki tur kırpılma sanıp dosyayı baştan oynatır (6 numaralı kural) |
+| `Reader.poll` | `raw = raw[:cut]` decode öncesi | Kuyruk bu turda çözülürse `\n`'ini bekleyen tam JSON satırı bu tur işlenir, sonraki tur yeniden okunup ikinci kez işlenir. `\n` çok baytlı karakterin içinde geçmediği için kesim U+FFFD üretmez |
+| `Reader.poll` | `_read_end` notu | Yarım kuyruk bekleyen dosyada offset boyun gerisinde kalır, `st_size == offset` kapısı elemez: yazan süreç satırın ortasında ölürse aynı kuyruk her turda yeniden açılır. Not son okumanın bittiği baytı tutar; kapı ve kırpılma testi ona bakar, kırpılma eskisi gibi görülen boyutun altına inişte tetiklenir. Ölçüm: 1 MiB bayat kuyruk, yoklama arka ucu, 8 sn: notla %0,016 CPU, notsuz %0,113 |
 | `Reader._side` | `if not first: return` (turn) | Aynı API yanıtı transcript'te birkaç `assistant` satırına bölünür, hepsi `end_turn` taşır; metinsiz olanlar basılsa "tur bitti" iki üç kez düşüyordu (11.09 d204'de görüldü) |
 | `Reader._side` | `origin is None` + `<command-message>` → `fire` | `/loop` ve cron ateşlemeleri `origin` taşımıyor; insan satırı sayılsa watcher oturumu her 10 dakikada "seni bekliyor" diyordu |
 | `Reader._events` | `ScheduleWakeup`/`CronCreate` → `loops` | Dinamik döngü ateşlemeyi kendisi planlar; `end_turn` sonrası uyanmayı bekler, kullanıcıyı değil |
@@ -189,6 +193,7 @@ Koddaki tek satırlık yorumların uzun gerekçesi. Bu satırları sadeleştirme
 - Yoklama 250 ms (`--interval`); göz kararı anlık ama tam senkron değil.
 - Transcript'ler varsayılan 30 gün tutulur; `replay` ve `stats` o pencereyle sınırlı.
 - "Tur bitti" kapatılmış oturumda da görünür; transcript'te kapanış imzası yok.
+- Satır `\n` gelmeden işlenmez: tek seferlik okuyan `replay` ve `wait` `\n`'siz son satırı görmez. Ölçülen 5.033 transcript'in hepsi `\n` ile bitiyor.
 
 ## Doküman Bakımı
 

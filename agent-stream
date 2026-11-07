@@ -488,6 +488,7 @@ class Reader:
         self.all_tools, self.subagents, self.stale_min = all_tools, subagents, stale_min
         self.tail = tail
         self.offsets: dict[str, int] = {}
+        self._read_end: dict[str, int] = {}                # son okumanın bittiği bayt; yarım kuyrukta offset'in önünde
         self.open: dict[str, Cmd] = {}
         self.asks: dict[str, Note] = {}
         self.loops: set[str] = set()                       # ScheduleWakeup çağıran oturumlar
@@ -742,15 +743,16 @@ class Reader:
                 if first and self.tail:                    # durum kurmak için yalnız kuyruk
                     self.offsets[path] = max(0, st.st_size - self.tail)
                     mid = self.offsets[path] > 0
-            if st.st_size < self.offsets[path]:            # kırpılmış / döndürülmüş
-                self.offsets[path] = 0
-            if st.st_size == self.offsets[path]:
+            known = self._read_end.setdefault(path, self.offsets[path])
+            if st.st_size < known:                         # kırpılmış / döndürülmüş
+                self.offsets[path] = self._read_end[path] = known = 0
+            if st.st_size == known:                        # yeni bayt yok; bayat yarım kuyruk yeniden açılmaz
                 continue
             try:
                 with open(path, "rb") as fh:
                     fh.seek(self.offsets[path])
                     raw = fh.read()
-                    self.offsets[path] = fh.tell()
+                    end = fh.tell()
             except OSError:
                 continue
             if mid and b"\n" not in raw:                   # kuyruk tek dev satırın içinde (ekran görüntüsü)
@@ -758,12 +760,17 @@ class Reader:
                     with open(path, "rb") as fh:
                         fh.seek(max(0, st.st_size - 8 * self.tail))
                         raw = fh.read()
-                        self.offsets[path] = fh.tell()
+                        end = fh.tell()
                 except OSError:
                     continue
+            cut = raw.rfind(b"\n") + 1                     # yarım son satır sonraki tura kalır; \n yoksa 0
+            self.offsets[path] = end - len(raw) + cut      # sondan geriye: mid'de raw ikinci okumanın başından başlar
+            self._read_end[path] = end
+            raw = raw[:cut]                                # decode öncesi: \n'ini bekleyen tam JSON iki kez işlenmez
             if mid:                                        # kuyruğun ilk satırı yarım, atılır
                 raw = raw.split(b"\n", 1)[1] if b"\n" in raw else b""
-            lines = raw.decode("utf-8", errors="replace").splitlines()
+            # Yalnız \n böler: JSON metninde U+2028, U+2029, U+0085 ham durur; son eleman \n sonrası boşluk.
+            lines = raw.decode("utf-8", errors="replace").split("\n")[:-1]
             if first and backfill:
                 lines = lines[-backfill * 6:]
             for line in lines:
@@ -1853,7 +1860,7 @@ def cmd_stats(args) -> None:
         except OSError:
             continue
         sid = os.path.basename(path)[:-6]
-        for line in raw.decode("utf-8", errors="replace").splitlines():
+        for line in raw.decode("utf-8", errors="replace").split("\n"):  # poll ile aynı: yalnız \n böler
             if not any(m in line for m in MARKS):
                 continue
             try:
